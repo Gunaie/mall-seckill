@@ -1,0 +1,105 @@
+# 容器/生产环境配置（SPRING_PROFILES_ACTIVE=prod）
+# 中间件走 Docker Compose 容器网络主机名；敏感项通过环境变量覆盖，默认值仅用于本地演示
+spring:
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:mall123456}
+      database: 0
+      timeout: 3000ms
+      lettuce:
+        pool:
+          enabled: true
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 3000ms
+  rabbitmq:
+    host: ${RABBITMQ_HOST:rabbitmq}
+    port: 5672
+    username: ${RABBITMQ_USER:mall}
+    password: ${RABBITMQ_PASSWORD:mall123456}
+    virtual-host: /
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 10
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:mysql}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:mall_seckill}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:root123456}
+    druid:
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      max-wait: 60000
+      validation-query: SELECT 1
+      test-while-idle: true
+      # 容器内不开放 Druid SQL 监控页，仅保留防火墙过滤器
+      filters: wall
+
+# MyBatis-Plus（生产环境关闭 SQL 打印）
+mybatis-plus:
+  type-aliases-package: com.mall.entity
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# 业务自定义配置（环境变量可覆盖开关与密钥）
+mall:
+  # 接口限流总开关，生产必须 true；压测时通过 ACCESS_LIMIT_ENABLED=false 临时关闭
+  access-limit:
+    enabled: ${ACCESS_LIMIT_ENABLED:true}
+  cache:
+    spu-detail-ttl: 1800
+    spu-detail-ttl-jitter: 600
+    # Caffeine 本地一级缓存 TTL（秒），应小于 Redis 二级缓存 TTL
+    spu-detail-local-ttl: 300
+    null-value-ttl: 120
+    category-tree-ttl: 3600
+  order:
+    timeout-seconds: ${ORDER_TIMEOUT_SECONDS:60}
+    token-ttl-seconds: 600
+  seckill:
+    # 本地内存售罄标记，压测对比时用 SECKILL_LOCAL_MARK_ENABLED=false 关闭
+    local-mark-enabled: ${SECKILL_LOCAL_MARK_ENABLED:true}
+    result-ttl-seconds: 600
+    sessions-cache-ttl-seconds: 60
+    captcha-ttl-seconds: 120
+    path-ttl-seconds: 60
+    path-salt: ${SECKILL_PATH_SALT:mall-seckill-path-salt-2026}
+    # 验证码开关，压测时通过 SECKILL_CAPTCHA_ENABLED=false 临时关闭
+    captcha-enabled: ${SECKILL_CAPTCHA_ENABLED:true}
+  jwt:
+    secret: ${JWT_SECRET:mall-seckill-jwt-secret-key-2026-must-be-long-enough}
+    access-token-expiration: 7200
+    refresh-token-expiration: 604800
+    # refresh Cookie 的 Secure 属性：HTTPS 环境设 true，HTTP 演示环境设 false
+    refresh-cookie-secure: ${JWT_REFRESH_COOKIE_SECURE:false}
+
+# 链路追踪：容器内通过服务名访问 Zipkin
+management:
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://zipkin:9411/api/v2/spans}
+  tracing:
+    sampling:
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+
+logging:
+  level:
+    com.mall: info
+    org.springframework.web: warn

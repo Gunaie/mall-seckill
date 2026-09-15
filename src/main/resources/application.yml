@@ -1,0 +1,61 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: mall-seckill
+  profiles:
+    active: dev
+
+# SpringDoc / Knife4j 接口文档
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+  group-configs:
+    - group: default
+      paths-to-match: /**
+      packages-to-scan: com.mall.controller
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+# Actuator 监控端点
+management:
+  endpoints:
+    web:
+      exposure:
+        # prometheus：供 Prometheus 抓取（/actuator/prometheus）
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      # 所有指标自动携带应用名与实例标识，便于多实例聚合/区分
+      application: ${spring.application.name}
+      instance: ${MALL_INSTANCE_INDEX:${HOSTNAME:local}}
+  # 分布式链路追踪（Micrometer Tracing + Brave）
+  tracing:
+    sampling:
+      # 采样率：1.0 表示全量采样（开发/压测环境）；生产环境建议 0.1~0.5 降低开销
+      probability: ${TRACING_SAMPLING_PROBABILITY:1.0}
+    propagation:
+      # 传播协议采用 W3C traceparent 标准（Spring Boot 3 默认），跨服务/Nginx 透传
+      type: w3c
+  zipkin:
+    tracing:
+      # Zipkin 上报地址；容器内走服务名 zipkin，本地开发用 localhost
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+
+# 日志格式：在日志中携带 traceId/spanId，便于按链路串联多实例日志
+logging:
+  pattern:
+    level: "%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-}]"
