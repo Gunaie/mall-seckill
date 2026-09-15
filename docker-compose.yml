@@ -1,0 +1,189 @@
+# mall-seckill 全栈一键编排：中间件 + 双应用实例 + Nginx + Prometheus + Grafana
+# 启动全部: docker compose up -d
+# 仅中间件: docker compose up -d mysql redis rabbitmq
+# 停止: docker compose down
+# 清理数据卷: docker compose down -v
+# 显式指定 Compose 项目名，避免默认取目录名（java3）
+name: mall-seckill
+
+# 应用实例共享配置锚点
+x-app-base: &app-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: mall-seckill-app:1.0.0
+  restart: unless-stopped
+  depends_on:
+    mysql:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+  environment: &app-env
+    SPRING_PROFILES_ACTIVE: prod
+    # 单实例限堆 384m，双实例 + 监控栈在开发机可同时运行
+    JAVA_OPTS: "-Xms128m -Xmx384m -Duser.timezone=Asia/Shanghai -Djava.security.egd=file:/dev/./urandom"
+  networks:
+    - mall-net
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mall-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: mall_seckill
+      TZ: Asia/Shanghai
+    ports:
+      # 宿主机 3306 被原生 MySQL 占用，3307-3406 被 Hyper-V 保留，故映射到 13306；容器间仍用 mysql:3306
+      - "13306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+    volumes:
+      - mall-mysql-data:/var/lib/mysql
+      # 仅在数据卷首次初始化时自动执行（建表 + 种子数据）
+      - ./sql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mall-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: mall-redis
+    restart: unless-stopped
+    # 开发环境密码 + AOF 持久化
+    command: redis-server --requirepass mall123456 --appendonly yes
+    ports:
+      # 宿主机 6379 被其他容器占用，映射到 6380；容器间仍用 redis:6379 访问
+      - "6380:6379"
+    volumes:
+      - mall-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "mall123456", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mall-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: mall-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: mall
+      RABBITMQ_DEFAULT_PASS: mall123456
+    ports:
+      - "5672:5672"     # AMQP 通信端口
+      - "15672:15672"   # 管理控制台
+    volumes:
+      - mall-rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - mall-net
+
+  # ---------- 应用双实例（不直接映射宿主端口，仅集群内访问） ----------
+  app1:
+    <<: *app-base
+    container_name: mall-app1
+    environment:
+      <<: *app-env
+      MALL_INSTANCE_INDEX: app1
+
+  app2:
+    <<: *app-base
+    container_name: mall-app2
+    environment:
+      <<: *app-env
+      MALL_INSTANCE_INDEX: app2
+
+  # ---------- Nginx 负载均衡（统一流量入口） ----------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: mall-nginx
+    restart: unless-stopped
+    ports:
+      - "8090:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # 前端构建产物（需先在 frontend/ 目录执行 npm run build）
+      - ./frontend/dist:/usr/share/nginx/html:ro
+    depends_on:
+      - app1
+      - app2
+    networks:
+      - mall-net
+
+  # ---------- 监控：Prometheus 指标采集 ----------
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: mall-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - mall-prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "9090:9090"
+    networks:
+      - mall-net
+
+  # ---------- 监控：Grafana 可视化（admin/admin123） ----------
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: mall-grafana
+    restart: unless-stopped
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - mall-grafana-data:/var/lib/grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    # 宿主机 3000 落在 Hyper-V 预留端口段（2940-3039），映射到 13000
+    ports:
+      - "13000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - mall-net
+
+  # ---------- 分布式链路追踪：Zipkin（接收 app 上报的 span，可视化调用链） ----------
+  zipkin:
+    image: openzipkin/zipkin:3.4
+    container_name: mall-zipkin
+    restart: unless-stopped
+    environment:
+      # 内存存储，重启后数据丢失（演示项目足够；生产用 Elasticsearch/MySQL 持久化）
+      STORAGE_TYPE: mem
+    ports:
+      - "9411:9411"
+    networks:
+      - mall-net
+
+volumes:
+  mall-mysql-data:
+  mall-redis-data:
+  mall-rabbitmq-data:
+  mall-prometheus-data:
+  mall-grafana-data:
+
+networks:
+  mall-net:
+    driver: bridge

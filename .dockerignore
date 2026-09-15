@@ -1,0 +1,12 @@
+# 构建产物（容器内重新构建，避免污染缓存层）
+target/
+# IDE / VCS
+.idea/
+.vscode/
+.git/
+*.iml
+# 文档与脚本（运行镜像不需要）
+scripts/
+*.md
+# 杂项
+$null
