@@ -1,0 +1,10 @@
+apiVersion: 1
+# Grafana 启动自动配置 Prometheus 数据源
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

@@ -1,0 +1,16 @@
+# Prometheus 抓取配置：双应用实例 + 自身
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: mall-app
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['app1:8080', 'app2:8080']
+        labels:
+          app: mall-seckill
