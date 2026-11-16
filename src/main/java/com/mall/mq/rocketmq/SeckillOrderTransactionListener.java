@@ -1,5 +1,6 @@
 package com.mall.mq.rocketmq;
 
+import com.mall.metrics.SeckillMetrics;
 import com.mall.mq.SeckillDispatchStatus;
 import com.mall.mq.message.SeckillOrderMessage;
 import com.mall.service.SeckillLocalTransactionService;
@@ -32,11 +33,13 @@ import org.springframework.stereotype.Component;
 public class SeckillOrderTransactionListener implements TransactionListener {
 
     private final SeckillLocalTransactionService localTransactionService;
+    private final SeckillMetrics metrics;
 
     @Override
     public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
         if (!(arg instanceof SeckillTxContext context)) {
             log.error("事务消息上下文缺失，回滚半消息, msgId={}", msg.getKeys());
+            metrics.recordTxRollback();
             return LocalTransactionState.ROLLBACK_MESSAGE;
         }
         SeckillOrderMessage message = context.getMessage();
@@ -46,10 +49,12 @@ public class SeckillOrderTransactionListener implements TransactionListener {
             context.setStatus(status);
             localTransactionService.markTxResult(message.getMessageId(), status);
             if (status == SeckillDispatchStatus.QUEUED) {
+                metrics.recordTxCommit();
                 return LocalTransactionState.COMMIT_MESSAGE;
             }
             log.info("秒杀本地事务未通过，回滚半消息, userId={}, seckillSkuId={}, status={}",
                     message.getUserId(), message.getSeckillSkuId(), status);
+            metrics.recordTxRollback();
             return LocalTransactionState.ROLLBACK_MESSAGE;
         } catch (Exception e) {
             // 本地事务结果未知：返回 UNKNOW，由 Broker 回查按 Redis 标记决定提交或回滚
@@ -61,15 +66,18 @@ public class SeckillOrderTransactionListener implements TransactionListener {
 
     @Override
     public LocalTransactionState checkLocalTransaction(MessageExt msg) {
+        metrics.recordTxCheck();
         String messageId = msg.getKeys();
         SeckillDispatchStatus status = localTransactionService.getTxResult(messageId);
         if (status == SeckillDispatchStatus.QUEUED) {
             log.info("事务回查确认本地事务成功，提交消息, transactionId={}, messageId={}",
                     msg.getTransactionId(), messageId);
+            metrics.recordTxCommit();
             return LocalTransactionState.COMMIT_MESSAGE;
         }
         log.warn("事务回查未找到预减成功标记，回滚消息, transactionId={}, messageId={}, status={}",
                 msg.getTransactionId(), messageId, status);
+        metrics.recordTxRollback();
         return LocalTransactionState.ROLLBACK_MESSAGE;
     }
 }

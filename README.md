@@ -434,6 +434,7 @@ powershell -ExecutionPolicy Bypass -File scripts/phase5-bench.ps1 -Mode reject -
   - `mall_seckill_execute_total{result=...}`：秒杀 execute 各出口计数（queued/sold_out/repeated/invalid_path/...）
   - `mall_seckill_execute_duration_seconds`：execute 耗时直方图
   - `mall_seckill_consume_total{result=...}`：异步消费结果计数
+  - `rocketmq_tx_commit_total` / `rocketmq_tx_rollback_total` / `rocketmq_tx_check_total`：事务消息最终提交、最终回滚与 Broker 回查次数
   - `mall_seckill_stock_remaining`：剩余库存 Gauge
   - `mall_rabbitmq.queue.messages`：队列堆积深度
 - **Grafana 大盘**：启动后自动 provisioning「秒杀可观测大盘」，访问 http://localhost:13000

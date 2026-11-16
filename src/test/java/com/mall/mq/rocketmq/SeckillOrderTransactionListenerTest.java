@@ -1,5 +1,6 @@
 package com.mall.mq.rocketmq;
 
+import com.mall.metrics.SeckillMetrics;
 import com.mall.mq.SeckillDispatchStatus;
 import com.mall.mq.message.SeckillOrderMessage;
 import com.mall.service.SeckillLocalTransactionService;
@@ -32,6 +33,9 @@ class SeckillOrderTransactionListenerTest {
 
     @Mock
     private SeckillLocalTransactionService localTransactionService;
+
+    @Mock
+    private SeckillMetrics metrics;
 
     @InjectMocks
     private SeckillOrderTransactionListener listener;

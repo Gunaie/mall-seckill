@@ -10,6 +10,8 @@ import org.springframework.stereotype.Component;
  *     <li>mall_seckill_execute_total{result=...}：execute 各出口计数（排队/售罄/重复/非法路径等）</li>
  *     <li>mall_seckill_execute_duration_seconds_bucket{result=...}：execute 耗时直方图（支持 P95/P99）</li>
  *     <li>mall_seckill_consume_total{result=...}：MQ 消费结果计数（成功/幂等跳过/失败）</li>
+ *     <li>rocketmq_tx_commit_total / rocketmq_tx_rollback_total / rocketmq_tx_check_total：
+ *         RocketMQ 事务消息的最终提交、最终回滚与 Broker 回查次数</li>
  * </ul>
  *
  * @author mall
@@ -74,5 +76,28 @@ public class SeckillMetrics {
      */
     public void recordConsume(String result) {
         meterRegistry.counter("mall.seckill.consume.total", "result", result).increment();
+    }
+
+    // ============================== RocketMQ 事务消息 ==============================
+
+    /**
+     * 半消息最终提交（本地事务成功，或 Broker 回查确认成功后提交）
+     */
+    public void recordTxCommit() {
+        meterRegistry.counter("rocketmq.tx.commit").increment();
+    }
+
+    /**
+     * 半消息最终回滚（售罄/重复/本地事务标记缺失）
+     */
+    public void recordTxRollback() {
+        meterRegistry.counter("rocketmq.tx.rollback").increment();
+    }
+
+    /**
+     * Broker 触发一次事务回查
+     */
+    public void recordTxCheck() {
+        meterRegistry.counter("rocketmq.tx.check").increment();
     }
 }
