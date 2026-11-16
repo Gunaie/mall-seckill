@@ -5,6 +5,7 @@
 ![Java](https://img.shields.io/badge/Java-17-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.5-brightgreen)
 ![Tests](https://img.shields.io/badge/tests-71%20passed-brightgreen)
+![CI](https://github.com/Gunaie/mall-seckill/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -16,6 +17,9 @@
 - [核心功能](#核心功能)
 - [秒杀漏斗设计](#秒杀漏斗设计)
 - [分布式事务与一致性设计](#分布式事务与一致性设计)
+- [JWT 安全设计](#jwt-安全设计)
+- [多级缓存设计](#多级缓存设计)
+- [分布式链路追踪](#分布式链路追踪)
 - [快速开始（Docker Compose）](#快速开始docker-compose)
 - [本地开发](#本地开发)
 - [API 概览](#api-概览)
@@ -24,7 +28,9 @@
 - [监控与可观测性](#监控与可观测性)
 - [CI/CD](#cicd)
 - [项目结构](#项目结构)
+- [前端页面](#前端页面)
 - [默认账号](#默认账号)
+- [License](#license)
 
 ---
 
@@ -366,9 +372,9 @@ java -jar target/mall-seckill.jar
 | 模块 | 前缀 | 说明 |
 |---|---|---|
 | 认证 | `/api/auth/*` | 登录 / 注册 / 刷新令牌（轮换）/ 登出（黑名单） / 当前用户信息 |
-| 商品 | `/api/spu/*`, `/api/category/*` | SPU/SKU、分类树 |
+| 商品 | `/api/spu/*`, `/api/categories/*` | SPU/SKU、分类树 |
 | 购物车 | `/api/cart/*` | 加购 / 修改数量 / 勾选 / 列表 |
-| 订单 | `/api/order/*` | 创建 / 支付 / 发货 / 确认 / 取消 / 列表 |
+| 订单 | `/api/orders/*` | 创建 / 支付 / 发货 / 确认 / 取消 / 列表 |
 | 秒杀 | `/api/seckill/*` | 场次列表 / 换取路径 / 执行抢购 / 结果轮询 |
 | 搜索 | `/api/search/spu` | 关键词（IK 分词）/ 分类 / 价格区间 / 排序 / 高亮 |
 | 管理端 | `/api/admin/*` | 商品、分类、订单、秒杀活动/场次/SKU 管理 |
@@ -469,14 +475,14 @@ mall-seckill/
 │   └── common/exception/    # 全局异常处理
 │
 ├── src/main/resources/
-│   ├── application-prod.yml # 容器化配置（全部支持环境变量覆盖）
+│   ├── application-prod.yml # 容器化配置（主要参数支持环境变量覆盖）
 │   └── sharding.yaml        # ShardingSphere 8 分片 + XA 规则
 ├── src/test/java/com/mall/  # 单元/集成测试
 ├── sql/init/                # 01-09 初始化脚本（schema + 种子数据）
 ├── sql/sharding/            # 订单分库建表脚本（ds1/ds2）
 ├── scripts/                 # SeckillBench.java + phaseN 验证/压测脚本
 ├── docker/                  # Nginx/RocketMQ/Prometheus/Grafana/ES 配置
-├── docs/                    # 01–07 架构/Redis/MQ/面试题与交易中台升级方案
+├── docs/                    # 01–03 架构/Redis/MQ，06–07 升级方案与面试问答
 └── benchmark-report-v2.md   # P0~P5 压测与瓶颈报告
 ```
 
@@ -496,9 +502,14 @@ mall-seckill/
 | 角色 | 用户名 | 密码 |
 |---|---|---|
 | 管理员 | admin | admin123 |
+| 普通用户 | demo | user123 |
 
 数据库初始化脚本位于 `sql/init/`，Docker 首次启动时自动执行。
 
+### 安全与数据说明
+
+本仓库用于学习与演示：全部账号、MySQL/Redis/RabbitMQ 密码、JWT 密钥与秒杀路径盐值均为**演示默认值**（集中在 `docker-compose.yml`、`src/main/resources/application-prod.yml`、`sharding.yaml`）。生产部署必须通过环境变量或密钥管理替换，并启用 HTTPS 与 `JWT_REFRESH_COOKIE_SECURE=true`。仓库不包含真实用户数据、私人凭据或第三方密钥；商品图片为演示素材。
+
 ## License
 
-MIT
+[MIT](LICENSE)

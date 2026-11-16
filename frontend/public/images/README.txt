@@ -1,9 +1,10 @@
-# 商品图片放置目录
+# 商品图片目录
 
-将 AI 生成的商品图片按以下文件名放入本目录，Vite 构建时会自动复制到 dist/images/。
-Nginx 会以 /images/xxx.png 路径对外提供访问。
+本目录已包含 8 张演示商品图（3 张 SPU 主图 + 5 张 SKU 图），Vite 构建时自动复制到 dist/images/，
+Nginx 以 /images/xxx.png 路径对外提供访问。文件名与 sql/init/04-pms-data.sql 中的路径一一对应，
+替换图片时保持文件名不变即可。
 
-## 文件命名（与 sql/init/04-pms-data.sql 中的路径一一对应）
+## 文件命名
 
 ### SPU 主图（商品列表页展示）
 - spu-1-x5-main.png      → 星河 X5 Pro 智能手机 主图
@@ -21,4 +22,4 @@ Nginx 会以 /images/xxx.png 路径对外提供访问。
 - 尺寸：800x800 或 1024x1024 正方形（商品卡片 object-fit: cover 裁剪）
 - 格式：PNG 或 JPG（质量 85%+），文件名需与 SQL 中扩展名一致
 - 背景：纯白或浅色渐变，突出产品主体
-- 单张大小：< 300KB
+- 单张大小：建议 < 500KB（仓库内演示图约 0.7~1.6MB，仅用于本地演示）

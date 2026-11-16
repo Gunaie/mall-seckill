@@ -12,15 +12,24 @@ logs/
 *.ipr
 *.iws
 .vscode/
+.vs/
 .settings/
 .project
 .classpath
+
+# 本地工具/缓存
+.trae/
+.screenshots/
+.local-docs/
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Env
+# Env / secrets
+.env
+.env.*
+!.env.example
 *.local
 
 # Frontend

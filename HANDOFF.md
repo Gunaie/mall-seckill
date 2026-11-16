@@ -187,4 +187,4 @@ docker exec -it mall-rabbitmq rabbitmqctl delete_queue seckill.order.queue
 | Nginx / 压测 profile | docker/nginx/nginx.conf、docker-compose.bench.yml |
 | 压测 | scripts/SeckillBench.java、scripts/phase5-bench.ps1、benchmark-report-v2.md |
 | 升级方案 | docs/06-交易中台升级方案.md |
-| 面试文档 | docs/01–05、docs/07-交易中台面试问答.md |
+| 面试文档 | docs/01–03、docs/07-交易中台面试问答.md |
