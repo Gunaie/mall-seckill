@@ -1,7 +1,7 @@
 # mall-seckill 交易中台压测报告 v2
 
 > 本报告记录「秒杀 Demo → 交易中台」升级过程中的基线、优化项与前后对比。
-> 当前状态：P0 基线、P1 治理、P2 事务消息、P3 分库分表、P4 ES 搜索、P5 2k+ QPS 压测与优化已完成；P6 交付中。
+> 当前状态：P0 基线、P1 治理、P2 事务消息、P3 分库分表、P4 ES 搜索、P5 2k+ QPS 压测与优化、P6 交付均已完成。
 
 ---
 
@@ -19,7 +19,7 @@
 | 秒杀商品 | seckillSkuId=4，DB 库存 200000，场次时间窗已延长 |
 | 压测用户 | 每轮注册独立用户，避开一人一单判重；Redis 库存置 0 模拟售罄 |
 
-> 说明：本机同时运行其他项目容器，宿主空闲内存约 0.7GB，压测结果低于历史报告的历史机器环境；v2 报告所有对比均在同一台机器、同一时段完成。
+> 说明：本机同时运行其他项目容器，压测期间宿主空闲内存约 0.4~0.7GB（不同时段采样），压测结果低于历史报告的历史机器环境；v2 报告所有对比均在同一台机器、同一时段完成。
 
 ---
 
@@ -29,7 +29,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 单元/集成测试 | `mvn test` 66 个用例全部通过 |
+| 单元/集成测试 | `mvn test` 66 个用例全部通过（P0 时点；升级完成后为 71 个） |
 | 端到端冒烟 | `SMOKE_OK`，下单成功 orderId=22，重复抢购被拦截，匿名 401 |
 | 历史遗留修复 | 旧数据卷缺少 `mq_consume_log`，已按 `sql/init/09-mq-schema.sql` 补建；否则消费端无法幂等落库 |
 
@@ -60,7 +60,7 @@
 | Redis 往返次数是主因 | 售罄路径 4 次 RTT，本地标记前仍有 1 次 | P5 合并 Lua + 本地缓存后对比 |
 | 客户端/宿主在 c=400 饱和 | c=400 QPS 低于 c=100，且出现 22 个网络错误 | 多并发梯度测试 |
 | 应用不是 CPU 瓶颈 | 压测后 app CPU <1%，宿主 Load 19% | 压测中采样 `docker stats` + JFR |
-| 内存压力影响延迟 | 宿主空闲内存 0.7GB | 限制容器内存、压测前清理无关容器（需确认） |
+| 内存压力影响延迟 | 宿主空闲内存 0.4~0.7GB | 限制容器内存、压测前清理无关容器（需确认） |
 
 ---
 
@@ -270,7 +270,7 @@ ES 故障时自动降级数据库且接口不报错，恢复后自动回到 ES �
 | 优化 | 位置 | 收益 |
 |---|---|---|
 | 本地售罄标记前移到第 1 步 + TTL 自愈 | `SeckillServiceImpl#execute` | 售罄拒绝业务侧 **0 次 Redis 往返**；TTL=10s（`SECKILL_LOCAL_MARK_TTL_SECONDS`）让多实例在补货后自动恢复 |
-| 秒杀商品信息本地缓存 | `SeckillServiceImpl#loadCache`（Caffeine，TTL 5s，`seckill.sku-local-cache-seconds`） | 热路径省掉「场次索引 + hash 详情」2 次 Redis 往返 |
+| 秒杀商品信息本地缓存 | `SeckillServiceImpl#loadCache`（Caffeine，TTL 5s，`mall.seckill.sku-local-cache-seconds`） | 热路径省掉「场次索引 + hash 详情」2 次 Redis 往返 |
 | Lua 内合并结果 key 删除 | `SeckillLocalTransactionService` | 预减成功后不再单独执行一次 `DEL` |
 | 用户/权限本地缓存 | `CustomUserDetailsService`（Caffeine，30s） | 每请求省掉 3 次 DB 查询（用户 + 角色 + 权限） |
 | 热路径日志降级 | 事务消息投递、秒杀下单、订单创建、延迟关单 | 每单 4 条 INFO → debug，避免 Docker json-file 在千级 QPS 下串行化写入 |

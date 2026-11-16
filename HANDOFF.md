@@ -1,6 +1,6 @@
 # 项目交接文档 HANDOFF
 
-> 最后更新：2026-11-16
+> 最后更新：2026-11-17
 > 用途：供下次会话快速接手，无需重新摸索。本文档只记录事实、当前状态、坑与下一步。
 
 ---
@@ -25,10 +25,10 @@ mall-seckill：个人独立完成的前后端分离高并发电商秒杀 / 交�
 | P3 | ShardingSphere 订单域 8 分片 + XA（含 P2 回归） | ✅ |
 | P4 | Elasticsearch 8.11.4 + IK 商品搜索（含 UI 验证） | ✅ |
 | P5 | 2k+ QPS 压测与热路径优化 | ✅ |
-| P6 | 文档与交付（README / HANDOFF / 面试问答 / 提交） | 进行中 |
+| P6 | 文档与交付（README / HANDOFF / 面试问答 / 提交） | ✅ |
 
-- 测试：`mvn test` 全绿（10 个测试类，单元 + embedded-redis 集成）
-- 可运行性：`docker compose up -d` 一键起全栈（15 个容器），入口 http://localhost:8090
+- 测试：`mvn test` 全绿（10 个测试类 / 71 个用例：67 单元 + 4 集成）
+- 可运行性：`docker compose up -d` 一键起全栈（16 个容器），入口 http://localhost:8090
 - 默认账号：admin/admin123；压测账号 p5_reject/123456
 
 ### 本轮升级新增容器
@@ -39,7 +39,7 @@ mall-seckill：个人独立完成的前后端分离高并发电商秒杀 / 交�
 | mall-rocketmq-namesrv / broker | 9876 / 10911 | 事务消息 |
 | mall-nacos | 8848（gRPC 9848） | 注册 + 配置 + Sentinel 规则存储 |
 | mall-sentinel | 8858 | 控制台（sentinel/sentinel） |
-| mall-elasticsearch | 9200 | ES 8.11.4 + IK，索引 `mall_spu` |
+| mall-elasticsearch | 9200 | ES 8.11.4 + IK，索引 `pms_spu` |
 
 ## 3. 阶段成果速记
 
@@ -47,7 +47,7 @@ mall-seckill：个人独立完成的前后端分离高并发电商秒杀 / 交�
 
 - 双实例注册到 Nacos（`mall-seckill-app`），配置项与 Sentinel 规则存 Nacos
 - Sentinel 热点参数限流：`seckill:execute` 2000 QPS/实例，`/api/admin/governance/state` 可查看当前规则
-- 验证脚本 `scripts/phase1-verify.ps1`（输出 `P1_OK`）
+- 验证脚本 `scripts/phase1-verify.ps1`（输出 `GOVERNANCE_VERIFY_DONE`）
 
 ### P2 事务消息
 
@@ -82,7 +82,7 @@ sendMessageInTransaction
 | 优化 | 收益 |
 |---|---|
 | 本地售罄标记前移到第 1 步 + TTL 10s 自愈 | 拒绝路径业务侧 0 次 Redis 往返 |
-| 秒杀商品信息 Caffeine 5s（`seckill.sku-local-cache-seconds`） | 省 2 次 Redis 往返 |
+| 秒杀商品信息 Caffeine 5s（`mall.seckill.sku-local-cache-seconds`） | 省 2 次 Redis 往返 |
 | 认证信息 Caffeine 30s（`CustomUserDetailsService`） | 省每请求 3 次 DB 查询 |
 | Lua 预减合并删除结果 key | 省 1 次 DEL |
 | 每单 INFO 日志 → debug | 降低 Docker json-file 写入压力 |
@@ -144,13 +144,13 @@ docker exec -it mall-rabbitmq rabbitmqctl delete_queue seckill.order.queue
 1. **afterCommit 极小窗口丢消息**：`mall.rocketmq.enabled=false` 回退链路下存在「DB 已提交、MQ 未发、进程宕机」窗口；事务消息链路已消除该问题，但两种链路并存需说明。
 2. **本地状态不共享**：Caffeine 与售罄标记是实例级，靠短 TTL 收敛（售罄标记 10s、秒杀信息 5s、认证 30s）。补货后需对每台实例触发预热或等 TTL。
 3. **成功路径 CPU 瓶颈**：同一 JVM 既发事务消息又消费，Atomikos XA 写 3 个 MySQL，P5 实测 app1/app2 各 300~360% CPU。继续提升需拆分消费进程或减少 XA 参与方。
-4. **宿主资源**：8 核 / Docker VM 11.68GB，压测时空闲内存约 0.4GB，p99 出现 3~5s 尖刺；4 实例扩容反而降至 1081 QPS，已回退 2 实例。
+4. **宿主资源**：8 核 / Docker VM 11.68GB，压测时空闲内存约 0.4~0.7GB，p99 出现 3~5s 尖刺；4 实例扩容反而降至 1081 QPS，已回退 2 实例。
 5. **ES 单节点**：无副本、无鉴权，仅演示用；索引重建依赖定时补偿。
 6. 压测数字均为本地单机数据，不可宣称为生产数据。
 
 ## 7. 下一步计划
 
-- [ ] P6 收尾：README / HANDOFF / `docs/07-交易中台面试问答.md` / 提交推送
+- [x] P6 收尾：README / HANDOFF / `docs/07-交易中台面试问答.md` / 提交
 - [ ] Outbox 本地消息表 + 定时对账（补齐回退链路的丢消息窗口）
 - [ ] 消费进程拆分（或独立 consumer 实例），验证成功路径能否稳定 ≥1000 QPS 且 p99 < 150ms
 - [ ] Zipkin 接 Elasticsearch 持久化；ES 增加副本与鉴权

@@ -81,7 +81,7 @@
 - **商品中心**：SPU/SKU 模型、分类树形结构、多级缓存（Caffeine 本地 L1 + Redis L2 + 空值防穿透 + Redisson 锁防击穿 + TTL 抖动防雪崩）
 - **购物车**：Redis Hash 存储，库存校验、数量修改、勾选
 - **订单系统**：状态机流转（待支付→已支付→已发货→已完成/已取消）、幂等令牌、RabbitMQ 死信队列超时自动关单、服务端重算价防篡改
-- **秒杀系统**：六级漏斗（售罄标记→路径→时间→库存→一人一单→MQ）、Redis Lua 原子预减、本地内存售罄标记（2.16× 优化）、RocketMQ 事务消息异步下单、消费失败入死信队列(DLQ)兜底告警
+- **秒杀系统**：六级漏斗（售罄标记→路径→时间→库存→一人一单→MQ）、Redis Lua 原子预减、本地内存售罄标记（P0 对比 2.16×，P5 前移后拒绝路径峰值 2539 QPS）、RocketMQ 事务消息异步下单、消费失败入死信队列(DLQ)兜底告警
 - **交易一致性**：RocketMQ 事务消息（半消息 → 本地事务 → commit/rollback → Broker 回查）替代纯 afterCommit 发送，Redis 事务标记支撑回查
 - **订单分库分表**：ShardingSphere-JDBC 8 分片（库 `user_id % 2`，表 `(user_id >> 1) % 4`），XA + Atomikos 保证跨库原子性，订单/秒杀关联/明细同槽位路由
 - **商品搜索**：Elasticsearch 8.11.4 + IK 中文分词，关键词高亮、分类/价格筛选、销量/价格排序；Redis 脏集合增量同步 + 定时补偿，ES 不可用时自动降级 DB
@@ -103,7 +103,7 @@
 ```
 
 **核心优化**：
-- 本地售罄标记前移到第①级，并对标记加 10s TTL（`seckill.local-mark-ttl-seconds`），多实例补货后自动自愈，实测拒绝路径 QPS 提升 **2.16 倍**至 2k+
+- 本地售罄标记前移到第①级，并对标记加 10s TTL（`mall.seckill.local-mark-ttl-seconds`），多实例补货后自动自愈；P0 基线本地标记 ON/OFF 对比为 **2.16 倍**（476→1026），P5 前移后拒绝路径峰值 **2539 QPS**（c=100，P0 基线 787）
 - 秒杀商品信息走 Caffeine 本地缓存（5s），热路径省掉 2 次 Redis 往返
 - 认证信息 Caffeine 缓存 30s，每请求省掉 3 次 DB 查询（用户 + 角色 + 权限）
 - Lua 预减成功顺带删除结果 key，省掉 1 次独立 `DEL`
@@ -339,14 +339,13 @@ powershell -ExecutionPolicy Bypass -File scripts/phase7-smoke.ps1
 
 ## 本地开发
 
-前置：JDK 17、Maven 3.9+、MySQL 8、Redis 7、RabbitMQ 3、Node.js 18+。
+前置：JDK 17、Maven 3.9+、Node.js 18+。中间件建议直接复用 compose 容器（dev profile 默认连宿主机映射端口：MySQL 13306、Redis 6380、RabbitMQ 5672；分库分表只在 prod profile 启用，Nacos/Sentinel 默认关闭，RocketMQ 关闭时走 RabbitMQ 回退链路）。
 
 ```bash
-# 1. 初始化数据库（按顺序执行 sql/init/01-09.sql）
-mysql -uroot -p < sql/init/01-schema.sql
-# ... 其余脚本同理
+# 1. 启动中间件（首次启动会自动执行 sql/init/01-09.sql）
+docker compose up -d mysql redis rabbitmq
 
-# 2. 启动后端（dev profile，连接本地中间件）
+# 2. 启动后端（dev profile）
 mvn spring-boot:run
 
 # 3. 启动前端（开发模式，热更新，/api 代理到 localhost:8090）
@@ -390,8 +389,8 @@ mvn test
 
 | 层级 | 数量 | 说明 |
 |---|---|---|
-| 单元测试 | 66 | Mockito 纯单测，隔离 DB/MQ/Redis，毫秒级。覆盖秒杀漏斗六级出口、订单状态机、购物车、验证码、限流切面、JWT 黑名单、多级缓存（Caffeine→Redis→DB 回源与失效）、TraceId 响应过滤器、RocketMQ 事务监听器三种本地事务状态、ES 搜索降级 |
-| 集成测试 | 5 | JVM 内嵌 Redis（embedded-redis），验证 Lua 原子预减、一人一单判重、库存耗尽售罄、结果轮询、售罄补偿 |
+| 单元测试 | 67 | Mockito 纯单测，隔离 DB/MQ/Redis，毫秒级。覆盖秒杀漏斗六级出口、订单状态机、购物车、验证码、限流切面、JWT 黑名单、多级缓存（Caffeine→Redis→DB 回源与失效）、TraceId 响应过滤器、RocketMQ 事务监听器三种本地事务状态、ES 搜索降级 |
+| 集成测试 | 4 | JVM 内嵌 Redis（embedded-redis），验证 Lua 原子预减、一人一单判重、库存耗尽售罄、结果轮询 |
 
 ## 性能压测
 
@@ -406,7 +405,7 @@ mvn test
 | 错误率 | 0.44% | <0.01% |
 | 不超卖 / 不重复 | 0 | 0（8 分片累计 27005 单验签） |
 
-> 压测客户端 `scripts/SeckillBench.java` 运行在 compose 网络内的容器中，直连 Nginx，避开 Windows 端口转发噪声。同一配置跨轮次波动 1.0k~2.5k，主因是宿主空闲内存不足 0.5GB；成功路径瓶颈为「同一 JVM 既发事务消息又消费 + Atomikos XA 写 3 个 MySQL」的 CPU 消耗。
+> 压测客户端 `scripts/SeckillBench.java` 运行在 compose 网络内的容器中，直连 Nginx，避开 Windows 端口转发噪声。同一配置跨轮次波动 1.0k~2.5k，主因是宿主空闲内存仅约 0.4~0.7GB；成功路径瓶颈为「同一 JVM 既发事务消息又消费 + Atomikos XA 写 3 个 MySQL」的 CPU 消耗。
 
 复现命令：
 
@@ -436,7 +435,7 @@ powershell -ExecutionPolicy Bypass -File scripts/phase5-bench.ps1 -Mode reject -
 - **链路追踪**：Zipkin http://localhost:19411，响应头 `X-Trace-Id` 可直接定位调用链
 - **注册/配置**：Nacos http://localhost:8848（服务列表、配置项、Sentinel 规则）
 - **流量治理**：Sentinel http://localhost:8858（热点参数限流规则，持久化在 Nacos）
-- **搜索**：Elasticsearch http://localhost:9200，索引 `mall_spu`
+- **搜索**：Elasticsearch http://localhost:9200，索引 `pms_spu`
 
 ## CI/CD
 
@@ -477,7 +476,7 @@ mall-seckill/
 ├── sql/sharding/            # 订单分库建表脚本（ds1/ds2）
 ├── scripts/                 # SeckillBench.java + phaseN 验证/压测脚本
 ├── docker/                  # Nginx/RocketMQ/Prometheus/Grafana/ES 配置
-├── docs/                    # 交易中台升级方案、面试问答
+├── docs/                    # 01–07 架构/Redis/MQ/面试题与交易中台升级方案
 └── benchmark-report-v2.md   # P0~P5 压测与瓶颈报告
 ```
 

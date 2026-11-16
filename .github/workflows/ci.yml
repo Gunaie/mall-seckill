@@ -1,4 +1,4 @@
-# mall-seckill CI：测试门禁（47 个单元/集成用例）-> 打包 -> 镜像构建校验
+# mall-seckill CI：测试门禁（71 个单元/集成用例）-> 打包 -> 镜像构建校验
 # 集成测试使用 JVM 内嵌 Redis（embedded-redis），runner 无需 Docker/MySQL/RabbitMQ
 name: CI
 
@@ -24,7 +24,7 @@ jobs:
           cache: maven
 
       - name: Run tests and package
-        # verify 阶段执行全部用例（47），测试失败即中断流水线；同时产出可运行 fat jar
+        # verify 阶段执行全部用例（71），测试失败即中断流水线；同时产出可运行 fat jar
         run: mvn -B verify
 
       - name: Upload test reports on failure
