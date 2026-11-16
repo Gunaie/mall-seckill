@@ -21,6 +21,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -65,6 +66,8 @@ class PmsSpuServiceImplCacheTest {
     private RedissonClient redissonClient;
     @Mock
     private RLock rLock;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     private CacheProperties cacheProperties;
     private Cache<String, Object> localCache;
@@ -79,7 +82,8 @@ class PmsSpuServiceImplCacheTest {
         localCache = Caffeine.newBuilder().maximumSize(1000).expireAfterWrite(
                 java.time.Duration.ofSeconds(cacheProperties.getSpuDetailLocalTtl())).build();
         spuService = new PmsSpuServiceImpl(skuMapper, categoryMapper, redisTemplate,
-                redissonClient, cacheProperties, new com.fasterxml.jackson.databind.ObjectMapper(), localCache);
+                redissonClient, cacheProperties, new com.fasterxml.jackson.databind.ObjectMapper(), localCache,
+                eventPublisher);
         // ServiceImpl 的 baseMapper 是 protected 字段，通过反射注入 mock
         ReflectionTestUtils.setField(spuService, "baseMapper", spuMapper);
 

@@ -170,18 +170,18 @@ class OrderServiceImplTest {
     @DisplayName("pay 待支付 -> 已支付成功")
     void pay_success() {
         OmsOrder order = orderWith(OrderStatus.PENDING_PAY);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        when(orderMapper.payIfPending(1L)).thenReturn(1);
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        when(orderMapper.payIfPending(1L, USER_ID)).thenReturn(1);
         orderService.pay(1L);
-        verify(orderMapper).payIfPending(1L);
+        verify(orderMapper).payIfPending(1L, USER_ID);
     }
 
     @Test
     @DisplayName("pay 非待支付（已支付） -> 拒绝")
     void pay_notPending() {
         OmsOrder order = orderWith(OrderStatus.PAID);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        when(orderMapper.payIfPending(1L)).thenReturn(0);
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        when(orderMapper.payIfPending(1L, USER_ID)).thenReturn(0);
         assertThrows(BusinessException.class, () -> orderService.pay(1L));
     }
 
@@ -190,12 +190,12 @@ class OrderServiceImplTest {
     void cancel_success() {
         OmsOrder order = orderWith(OrderStatus.PENDING_PAY);
         order.setOrderType(1);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        when(orderMapper.cancelIfPending(eq(1L), any())).thenReturn(1);
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        when(orderMapper.cancelIfPending(eq(1L), eq(USER_ID), any())).thenReturn(1);
         when(orderItemMapper.selectList(any())).thenReturn(List.of());
 
         orderService.cancel(1L);
-        verify(seckillService, never()).restoreAfterOrderCancel(anyLong());
+        verify(seckillService, never()).restoreAfterOrderCancel(anyLong(), anyLong());
     }
 
     @Test
@@ -203,11 +203,11 @@ class OrderServiceImplTest {
     void cancel_seckillOrder() {
         OmsOrder order = orderWith(OrderStatus.PENDING_PAY);
         order.setOrderType(2);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        when(orderMapper.cancelIfPending(eq(1L), any())).thenReturn(1);
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        when(orderMapper.cancelIfPending(eq(1L), eq(USER_ID), any())).thenReturn(1);
 
         orderService.cancel(1L);
-        verify(seckillService, times(1)).restoreAfterOrderCancel(1L);
+        verify(seckillService, times(1)).restoreAfterOrderCancel(1L, USER_ID);
     }
 
     @Test
@@ -222,8 +222,8 @@ class OrderServiceImplTest {
     @DisplayName("confirm 非已发货 -> 拒绝")
     void confirm_notShipped() {
         OmsOrder order = orderWith(OrderStatus.PAID);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        when(orderMapper.completeIfShipped(1L)).thenReturn(0);
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        when(orderMapper.completeIfShipped(1L, USER_ID)).thenReturn(0);
         assertThrows(BusinessException.class, () -> orderService.confirm(1L));
     }
 
@@ -234,9 +234,9 @@ class OrderServiceImplTest {
     void closeExpired_notPending() {
         when(mqConsumeLogMapper.tryConsume(any(), any())).thenReturn(1);
         OmsOrder order = orderWith(OrderStatus.PAID);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        orderService.closeExpiredOrder(1L, "msg-1");
-        verify(orderMapper, never()).cancelIfPending(anyLong(), any());
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        orderService.closeExpiredOrder(1L, USER_ID, "msg-1");
+        verify(orderMapper, never()).cancelIfPending(anyLong(), anyLong(), any());
     }
 
     @Test
@@ -245,12 +245,12 @@ class OrderServiceImplTest {
         when(mqConsumeLogMapper.tryConsume(any(), any())).thenReturn(1);
         OmsOrder order = orderWith(OrderStatus.PENDING_PAY);
         order.setOrderType(1);
-        when(orderMapper.selectById(1L)).thenReturn(order);
-        when(orderMapper.cancelIfPending(eq(1L), any())).thenReturn(1);
+        when(orderMapper.selectOne(any())).thenReturn(order);
+        when(orderMapper.cancelIfPending(eq(1L), eq(USER_ID), any())).thenReturn(1);
         when(orderItemMapper.selectList(any())).thenReturn(List.of());
 
-        orderService.closeExpiredOrder(1L, "msg-2");
-        verify(orderMapper).cancelIfPending(eq(1L), any());
+        orderService.closeExpiredOrder(1L, USER_ID, "msg-2");
+        verify(orderMapper).cancelIfPending(eq(1L), eq(USER_ID), any());
     }
 
     // ============================ 越权 ============================
@@ -258,9 +258,8 @@ class OrderServiceImplTest {
     @Test
     @DisplayName("detail 跨用户访问 -> 返回 NOT_FOUND（不暴露存在性）")
     void detail_crossUser() {
-        OmsOrder order = orderWith(OrderStatus.PENDING_PAY);
-        order.setUserId(9999L); // 属于别人
-        when(orderMapper.selectById(1L)).thenReturn(order);
+        // id + user_id 双条件下路由查询查不到他人订单
+        when(orderMapper.selectOne(any())).thenReturn(null);
         BusinessException ex = assertThrows(BusinessException.class, () -> orderService.detail(1L));
         assertEquals(ResultCode.NOT_FOUND.getCode(), ex.getCode());
     }
@@ -268,7 +267,7 @@ class OrderServiceImplTest {
     @Test
     @DisplayName("detail 订单不存在 -> NOT_FOUND")
     void detail_notFound() {
-        when(orderMapper.selectById(1L)).thenReturn(null);
+        when(orderMapper.selectOne(any())).thenReturn(null);
         BusinessException ex = assertThrows(BusinessException.class, () -> orderService.detail(1L));
         assertEquals(ResultCode.NOT_FOUND.getCode(), ex.getCode());
     }

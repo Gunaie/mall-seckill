@@ -1,13 +1,15 @@
 # 压测模式覆盖文件：仅压测时与主 compose 叠加使用
 # 用法: docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d
-# 作用: 关闭双实例的滑动窗口限流与图形验证码（仅压测环境，生产严禁）
+# 作用: 关闭滑动窗口限流、图形验证码与链路追踪采样（仅压测环境，生产严禁）
 name: mall-seckill
 services:
   app1:
     environment:
       ACCESS_LIMIT_ENABLED: "false"
       SECKILL_CAPTCHA_ENABLED: "false"
+      TRACING_SAMPLING_PROBABILITY: "0"
   app2:
     environment:
       ACCESS_LIMIT_ENABLED: "false"
       SECKILL_CAPTCHA_ENABLED: "false"
+      TRACING_SAMPLING_PROBABILITY: "0"

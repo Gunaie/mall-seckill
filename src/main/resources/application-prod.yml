@@ -1,6 +1,47 @@
 # 容器/生产环境配置（SPRING_PROFILES_ACTIVE=prod）
 # 中间件走 Docker Compose 容器网络主机名；敏感项通过环境变量覆盖，默认值仅用于本地演示
 spring:
+  # Nacos 配置中心：可选导入，Nacos 不可用时仍可用本地默认值启动
+  config:
+    import: optional:nacos:mall-seckill.yaml?group=DEFAULT_GROUP&refreshEnabled=true
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${NACOS_SERVER_ADDR:nacos:8848}
+        group: DEFAULT_GROUP
+        enabled: true
+      config:
+        server-addr: ${NACOS_SERVER_ADDR:nacos:8848}
+        group: DEFAULT_GROUP
+        file-extension: yaml
+    sentinel:
+      eager: true
+      transport:
+        dashboard: ${SENTINEL_DASHBOARD:sentinel:8858}
+        port: 8719
+      datasource:
+        # 规则持久化在 Nacos，应用启动/变更时自动拉取，重启不丢
+        flow:
+          nacos:
+            server-addr: ${NACOS_SERVER_ADDR:nacos:8848}
+            group-id: SENTINEL_GROUP
+            data-id: ${spring.application.name}-flow-rules.json
+            data-type: json
+            rule-type: flow
+        degrade:
+          nacos:
+            server-addr: ${NACOS_SERVER_ADDR:nacos:8848}
+            group-id: SENTINEL_GROUP
+            data-id: ${spring.application.name}-degrade-rules.json
+            data-type: json
+            rule-type: degrade
+        param-flow:
+          nacos:
+            server-addr: ${NACOS_SERVER_ADDR:nacos:8848}
+            group-id: SENTINEL_GROUP
+            data-id: ${spring.application.name}-param-flow-rules.json
+            data-type: json
+            rule-type: param-flow
   data:
     redis:
       host: ${REDIS_HOST:redis}
@@ -15,6 +56,11 @@ spring:
           max-idle: 8
           min-idle: 2
           max-wait: 3000ms
+  # 商品搜索：ES 8.11.4 + IK 分词；ES 不可用时搜索接口自动降级 DB
+  elasticsearch:
+    uris: ${ES_URIS:http://elasticsearch:9200}
+    connection-timeout: 2s
+    socket-timeout: 3s
   rabbitmq:
     host: ${RABBITMQ_HOST:rabbitmq}
     port: 5672
@@ -30,20 +76,14 @@ spring:
         acknowledge-mode: manual
         prefetch: 10
   datasource:
-    type: com.alibaba.druid.pool.DruidDataSource
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://${MYSQL_HOST:mysql}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:mall_seckill}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
-    username: ${MYSQL_USER:root}
-    password: ${MYSQL_PASSWORD:root123456}
-    druid:
-      initial-size: 5
-      min-idle: 5
-      max-active: 20
-      max-wait: 60000
-      validation-query: SELECT 1
-      test-while-idle: true
-      # 容器内不开放 Druid SQL 监控页，仅保留防火墙过滤器
-      filters: wall
+    # 订单域分库分表：ShardingSphere-JDBC 驱动读取 classpath:sharding.yaml，
+    # 由 ShardingSphere 内部为 ds0/ds1/ds2 维护 Hikari 连接池；外层 Hikari 仅做连接包装。
+    driver-class-name: org.apache.shardingsphere.driver.ShardingSphereDriver
+    url: jdbc:shardingsphere:classpath:sharding.yaml
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
 
 # MyBatis-Plus（生产环境关闭 SQL 打印）
 mybatis-plus:
@@ -76,6 +116,10 @@ mall:
   seckill:
     # 本地内存售罄标记，压测对比时用 SECKILL_LOCAL_MARK_ENABLED=false 关闭
     local-mark-enabled: ${SECKILL_LOCAL_MARK_ENABLED:true}
+    # 本地售罄标记 TTL（秒）：多实例补货后靠 TTL 自动恢复，0 表示永不过期
+    local-mark-ttl-seconds: ${SECKILL_LOCAL_MARK_TTL_SECONDS:10}
+    # 秒杀商品信息本地缓存 TTL（秒）：省掉热路径 2 次 Redis 往返，0 表示关闭
+    sku-local-cache-seconds: ${SECKILL_SKU_LOCAL_CACHE_SECONDS:5}
     result-ttl-seconds: 600
     sessions-cache-ttl-seconds: 60
     captcha-ttl-seconds: 120
@@ -83,12 +127,31 @@ mall:
     path-salt: ${SECKILL_PATH_SALT:mall-seckill-path-salt-2026}
     # 验证码开关，压测时通过 SECKILL_CAPTCHA_ENABLED=false 临时关闭
     captcha-enabled: ${SECKILL_CAPTCHA_ENABLED:true}
+  # 秒杀下单事务消息：true 用 RocketMQ（半消息 + 本地事务 + 回查），false 回退 RabbitMQ 投递
+  # 本地 localhost 开发保持默认 false 即可，无需启动 RocketMQ
+  rocketmq:
+    enabled: ${ROCKETMQ_ENABLED:true}
+    name-server: ${ROCKETMQ_NAME_SERVER:rocketmq-namesrv:9876}
+    topic: ${ROCKETMQ_SECKILL_TOPIC:seckill-order-topic}
+    tag: seckill-order
+    producer-group: seckill-order-tx-producer
+    consumer-group: seckill-order-consumer
+    consume-thread-max: 20
+    tx-result-ttl-seconds: 3600
   jwt:
     secret: ${JWT_SECRET:mall-seckill-jwt-secret-key-2026-must-be-long-enough}
     access-token-expiration: 7200
     refresh-token-expiration: 604800
     # refresh Cookie 的 Secure 属性：HTTPS 环境设 true，HTTP 演示环境设 false
     refresh-cookie-secure: ${JWT_REFRESH_COOKIE_SECURE:false}
+  # 商品搜索：索引名与分词器；IK 插件缺失时自动降级 standard
+  search:
+    enabled: ${SEARCH_ENABLED:true}
+    index-name: ${SEARCH_INDEX_NAME:pms_spu}
+    analyzer: ${SEARCH_INDEX_ANALYZER:ik_max_word}
+    search-analyzer: ${SEARCH_ANALYZER:ik_smart}
+    compensate-interval-ms: 10000
+    timeout-ms: 2000
 
 # 链路追踪：容器内通过服务名访问 Zipkin
 management:

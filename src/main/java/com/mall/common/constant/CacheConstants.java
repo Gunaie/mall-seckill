@@ -43,6 +43,13 @@ public final class CacheConstants {
     /** 秒杀下单结果 key 前缀，拼接 用户ID:秒杀商品ID，值为订单号ID（成功）或 FAIL（失败） */
     public static final String SECKILL_RESULT_KEY = "seckill:result:";
 
+    /**
+     * 事务消息本地事务结果标记，拼接消息业务ID（messageId），值为本地事务状态名。
+     * 生产端 executeLocalTransaction 写入，Broker 回查 checkLocalTransaction 时读取，
+     * 避免回查时重复执行 Lua 或误用「已购集合」判定（已购集合无法区分本次事务是否成功）。
+     */
+    public static final String SECKILL_TX_RESULT_KEY = "seckill:tx:result:";
+
     /** 当日场次列表缓存 key 前缀，拼接 yyyy-MM-dd */
     public static final String SECKILL_SESSIONS_CACHE_KEY = "cache:seckill:sessions:";
 

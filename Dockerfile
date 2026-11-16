@@ -35,6 +35,12 @@ ENV TZ=Asia/Shanghai \
 
 COPY --from=builder --chown=mall:mall /build/mall-seckill.jar app.jar
 
+# Sentinel 默认写到 ${user.home}/logs/csp；Nacos 快照默认写到 ${user.home}/nacos/config；
+# RocketMQ 客户端日志容器内固定写到 ${user.home}/logs/rocketmqlogs（logback 配置写死 user.home）
+# 非 root 用户需要可写目录，统一在 /app/logs 与 /home/mall/logs 下创建并授权
+RUN mkdir -p /app/logs/sentinel /app/logs/nacos /home/mall/logs/rocketmqlogs \
+    && chown -R mall:mall /app/logs /home/mall
+
 USER mall
 EXPOSE 8080
 

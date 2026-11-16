@@ -30,15 +30,21 @@ public class OrderDelayMessage implements Serializable {
     private Long orderId;
 
     /**
+     * 下单用户ID（订单表分片键，关单时据此路由到唯一物理分片）
+     */
+    private Long userId;
+
+    /**
      * 订单号（便于日志排查，不参与业务判断）
      */
     private String orderSn;
 
     /**
-     * 业务构造器（保持原有调用签名不变），messageId 由字段默认值生成。
+     * 业务构造器（messageId 由字段默认值生成）
      */
-    public OrderDelayMessage(Long orderId, String orderSn) {
+    public OrderDelayMessage(Long orderId, String orderSn, Long userId) {
         this.orderId = orderId;
         this.orderSn = orderSn;
+        this.userId = userId;
     }
 }

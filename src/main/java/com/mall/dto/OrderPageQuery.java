@@ -23,4 +23,7 @@ public class OrderPageQuery {
 
     @Schema(description = "订单号（模糊匹配，管理端用）")
     private String orderSn;
+
+    @Schema(description = "用户ID（管理端按用户筛选；不传则广播查询所有分片）")
+    private Long userId;
 }

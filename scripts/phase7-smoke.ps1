@@ -29,17 +29,17 @@ Write-Host "    token ok"
 
 Write-Host "==> 2. create activity/session/seckill-sku and preheat"
 PostJson "/api/admin/seckill/activities" '{"name":"phase7-smoke"}' $token | Out-Null
-$activity = (GetJson "/api/admin/seckill/activities" $token).data[0]
+$activity = (GetJson "/api/admin/seckill/activities" $token).data | Sort-Object id -Descending | Select-Object -First 1
 $start = (Get-Date).AddMinutes(-2).ToString("yyyy-MM-ddTHH:mm:ss")
 $end = (Get-Date).AddHours(4).ToString("yyyy-MM-ddTHH:mm:ss")
 $sessJson = '{"activityId":' + $activity.id + ',"name":"phase7-session","startTime":"' + $start + '","endTime":"' + $end + '"}'
 PostJson "/api/admin/seckill/sessions" $sessJson $token | Out-Null
 $sessions = GetJson "/api/seckill/sessions" $token
-$session = $sessions.data | Where-Object { $_.name -eq "phase7-session" } | Select-Object -First 1
+$session = $sessions.data | Where-Object { $_.name -eq "phase7-session" } | Sort-Object id -Descending | Select-Object -First 1
 $skuJson = '{"sessionId":' + $session.id + ',"skuId":1,"seckillPrice":1.00,"seckillStock":1000}'
 PostJson "/api/admin/seckill/skus" $skuJson $token | Out-Null
 $skus = GetJson "/api/admin/seckill/skus?sessionId=$($session.id)" $token
-$seckillSkuId = $skus.data[0].id
+$seckillSkuId = ($skus.data | Sort-Object id -Descending | Select-Object -First 1).id
 Write-Host "    seckillSkuId=$seckillSkuId sessionId=$($session.id)"
 PostJson "/api/admin/seckill/skus/$seckillSkuId/upload" '{}' $token | Out-Null
 Write-Host "    preheat ok"

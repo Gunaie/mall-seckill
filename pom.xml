@@ -24,7 +24,30 @@
         <druid.version>1.2.23</druid.version>
         <jjwt.version>0.12.6</jjwt.version>
         <redisson.version>3.31.0</redisson.version>
+        <spring-cloud.version>2023.0.1</spring-cloud.version>
+        <spring-cloud-alibaba.version>2023.0.1.0</spring-cloud-alibaba.version>
+        <rocketmq.version>5.3.1</rocketmq.version>
+        <shardingsphere.version>5.5.0</shardingsphere.version>
     </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.alibaba.cloud</groupId>
+                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
+                <version>${spring-cloud-alibaba.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
         <!-- Web -->
@@ -110,10 +133,90 @@
             <artifactId>caffeine</artifactId>
         </dependency>
 
-        <!-- RabbitMQ：订单超时延迟关单（死信队列 TTL 方案）/ 秒杀异步下单 -->
+        <!-- Elasticsearch：商品搜索（IK 分词 + 高亮 + 价格/分类筛选） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-elasticsearch</artifactId>
+        </dependency>
+
+        <!-- 服务治理：Nacos 注册中心 + 配置中心 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-discovery</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-nacos-config</artifactId>
+        </dependency>
+        <!-- 服务治理：Sentinel 流控/熔断/热点参数 -->
+        <dependency>
+            <groupId>com.alibaba.cloud</groupId>
+            <artifactId>spring-cloud-starter-alibaba-sentinel</artifactId>
+        </dependency>
+        <!-- Sentinel 规则持久化到 Nacos -->
+        <dependency>
+            <groupId>com.alibaba.csp</groupId>
+            <artifactId>sentinel-datasource-nacos</artifactId>
+        </dependency>
+
+        <!-- RabbitMQ：订单超时延迟关单（死信队列 TTL 方案） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-amqp</artifactId>
+        </dependency>
+
+        <!-- RocketMQ：秒杀下单事务消息（半消息 -> 本地事务 -> commit/rollback -> 事务回查） -->
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-client</artifactId>
+            <version>${rocketmq.version}</version>
+        </dependency>
+
+        <!-- ShardingSphere-JDBC：订单域 2 库 × 4 表分片（生产 profile 生效，dev 仍走单库） -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-jdbc</artifactId>
+            <version>${shardingsphere.version}</version>
+            <exclusions>
+                <!-- 5.5.0 的 POM 把内部测试工具误声明为普通依赖，Maven Central 未发布该构件 -->
+                <exclusion>
+                    <groupId>org.apache.shardingsphere</groupId>
+                    <artifactId>shardingsphere-test-util</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- XA 分布式事务：订单库与主库（库存/幂等日志）跨库写入时保证原子提交 -->
+        <dependency>
+            <groupId>org.apache.shardingsphere</groupId>
+            <artifactId>shardingsphere-transaction-xa-core</artifactId>
+            <version>${shardingsphere.version}</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.shardingsphere</groupId>
+                    <artifactId>shardingsphere-test-util</artifactId>
+                </exclusion>
+                <!-- 仅使用 MySQL，排除 XA 模块顺带引入的其他数据库驱动 -->
+                <exclusion>
+                    <groupId>org.postgresql</groupId>
+                    <artifactId>postgresql</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.microsoft.sqlserver</groupId>
+                    <artifactId>mssql-jdbc</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.mariadb.jdbc</groupId>
+                    <artifactId>mariadb-java-client</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.opengauss</groupId>
+                    <artifactId>opengauss-jdbc</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.h2database</groupId>
+                    <artifactId>h2</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- JJWT（JWT 生成与解析） -->

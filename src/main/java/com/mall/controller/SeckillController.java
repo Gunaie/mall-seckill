@@ -2,6 +2,7 @@ package com.mall.controller;
 
 import com.mall.common.annotation.AccessLimit;
 import com.mall.common.result.Result;
+import com.mall.common.sentinel.SeckillBlockHandler;
 import com.mall.dto.SeckillExecuteDTO;
 import com.mall.dto.SeckillPathDTO;
 import com.mall.service.CaptchaService;
@@ -10,6 +11,7 @@ import com.mall.vo.CaptchaVO;
 import com.mall.vo.SeckillResultVO;
 import com.mall.vo.SeckillSessionVO;
 import com.mall.vo.SeckillSkuVO;
+import com.alibaba.csp.sentinel.annotation.SentinelResource;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -71,6 +73,8 @@ public class SeckillController {
     }
 
     @Operation(summary = "抢购第③步：携带动态路径立即抢购（异步下单，返回排队中后请轮询结果）")
+    @SentinelResource(value = "seckillExecute", blockHandler = "executeBlocked",
+            blockHandlerClass = SeckillBlockHandler.class)
     @AccessLimit(seconds = 3, maxCount = 5)
     @PostMapping("/{seckillSkuId}/{path}/execute")
     public Result<SeckillResultVO> execute(@PathVariable Long seckillSkuId,

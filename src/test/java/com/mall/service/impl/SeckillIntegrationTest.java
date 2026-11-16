@@ -8,8 +8,9 @@ import com.mall.config.SeckillProperties;
 import com.mall.metrics.SeckillMetrics;
 import com.mall.model.SeckillSkuCache;
 import com.mall.mq.OrderDelaySender;
-import com.mall.mq.SeckillOrderSender;
+import com.mall.mq.SeckillOrderDispatcher;
 import com.mall.service.CaptchaService;
+import com.mall.service.SeckillLocalTransactionService;
 import com.mall.vo.SeckillResultVO;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterAll;
@@ -199,17 +200,32 @@ class SeckillIntegrationTest {
         }
 
         @Bean
+        public SeckillLocalTransactionService seckillLocalTransactionService(StringRedisTemplate stringRedisTemplate) {
+            return new SeckillLocalTransactionService(stringRedisTemplate, new com.mall.config.RocketMqProperties());
+        }
+
+        /**
+         * 集成测试不连 MQ：直接用真实本地事务（Redis Lua）作为投递实现，
+         * 只验证预减/判重/幂等语义，消息通道由 P2 容器化验证覆盖。
+         */
+        @Bean
+        public SeckillOrderDispatcher seckillOrderDispatcher(SeckillLocalTransactionService localTransactionService) {
+            return message -> localTransactionService.executePreDeduct(message.getUserId(), message.getSeckillSkuId());
+        }
+
+        @Bean
         public SeckillServiceImpl seckillService(SeckillProperties properties,
                                                  SeckillMetrics metrics,
                                                  StringRedisTemplate stringRedisTemplate,
                                                  RedisTemplate<String, Object> redisTemplate,
-                                                 RedisConnectionFactory connectionFactory) {
+                                                 RedisConnectionFactory connectionFactory,
+                                                 SeckillOrderDispatcher seckillOrderDispatcher) {
             return new SeckillServiceImpl(
                     null, null, null, null, mock(com.mall.mapper.MqConsumeLogMapper.class),
                     null, null, null, null,
                     redisTemplate, stringRedisTemplate, mock(org.redisson.api.RedissonClient.class),
                     properties, new com.mall.config.OrderProperties(),
-                    mock(SeckillOrderSender.class), mock(OrderDelaySender.class),
+                    seckillOrderDispatcher, mock(OrderDelaySender.class),
                     mock(CaptchaService.class), metrics,
                     com.github.benmanes.caffeine.cache.Caffeine.newBuilder().build());
         }

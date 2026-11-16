@@ -25,6 +25,6 @@ public class OrderDelaySender {
         // CorrelationData 用于 publisher confirm 回调中定位消息
         CorrelationData correlationData = new CorrelationData(message.getOrderSn());
         rabbitTemplate.convertAndSend("", MqConstants.ORDER_DELAY_QUEUE, message, correlationData);
-        log.info("订单超时关单延迟消息已发送, orderId={}, orderSn={}", message.getOrderId(), message.getOrderSn());
+        log.debug("订单超时关单延迟消息已发送, orderId={}, orderSn={}", message.getOrderId(), message.getOrderSn());
     }
 }

@@ -16,14 +16,30 @@ x-app-base: &app-base
   depends_on:
     mysql:
       condition: service_healthy
+    mysql-order-0:
+      condition: service_healthy
+    mysql-order-1:
+      condition: service_healthy
     redis:
       condition: service_healthy
     rabbitmq:
       condition: service_healthy
+    rocketmq-broker:
+      condition: service_started
+    elasticsearch:
+      condition: service_healthy
   environment: &app-env
     SPRING_PROFILES_ACTIVE: prod
     # 单实例限堆 384m，双实例 + 监控栈在开发机可同时运行
-    JAVA_OPTS: "-Xms128m -Xmx384m -Duser.timezone=Asia/Shanghai -Djava.security.egd=file:/dev/./urandom"
+    JAVA_OPTS: "-Xms128m -Xmx384m -Duser.timezone=Asia/Shanghai -Djava.security.egd=file:/dev/./urandom -Dcsp.sentinel.log.dir=/app/logs/sentinel -DJM.SNAPSHOT.PATH=/app/logs/nacos"
+    # 服务治理：注册/配置中心与 Sentinel 控制台
+    NACOS_SERVER_ADDR: nacos:8848
+    SENTINEL_DASHBOARD: sentinel:8858
+    # 秒杀下单事务消息（RocketMQ）
+    ROCKETMQ_ENABLED: "true"
+    ROCKETMQ_NAME_SERVER: rocketmq-namesrv:9876
+    # 商品搜索（Elasticsearch + IK）
+    ES_URIS: http://elasticsearch:9200
   networks:
     - mall-net
 
@@ -47,6 +63,61 @@ services:
       - mall-mysql-data:/var/lib/mysql
       # 仅在数据卷首次初始化时自动执行（建表 + 种子数据）
       - ./sql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mall-net
+
+  # ---------- 订单域分库：ds1 / ds2（ShardingSphere 实际数据节点） ----------
+  # 与主库物理隔离，演示真实「分库」；单表结构见 sql/sharding/order-shard-schema.sql
+  mysql-order-0:
+    image: mysql:8.0
+    container_name: mall-mysql-order0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: mall_order_0
+      TZ: Asia/Shanghai
+    ports:
+      - "13307:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      # 订单库只做分片演示，压缩缓冲池降低资源占用
+      - --innodb-buffer-pool-size=128M
+    volumes:
+      - mall-mysql-order0-data:/var/lib/mysql
+      - ./sql/sharding:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123456"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - mall-net
+
+  mysql-order-1:
+    image: mysql:8.0
+    container_name: mall-mysql-order1
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root123456
+      MYSQL_DATABASE: mall_order_1
+      TZ: Asia/Shanghai
+    ports:
+      - "13308:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      - --innodb-buffer-pool-size=128M
+    volumes:
+      - mall-mysql-order1-data:/var/lib/mysql
+      - ./sql/sharding:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot123456"]
       interval: 10s
@@ -91,6 +162,98 @@ services:
       interval: 15s
       timeout: 10s
       retries: 5
+    networks:
+      - mall-net
+
+  # ---------- 交易一致性：RocketMQ 事务消息（秒杀下单） ----------
+  rocketmq-namesrv:
+    image: apache/rocketmq:5.3.1
+    container_name: mall-rocketmq-namesrv
+    restart: unless-stopped
+    command: sh mqnamesrv
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx256m -Xmn128m"
+      TZ: Asia/Shanghai
+    ports:
+      - "9876:9876"
+    networks:
+      - mall-net
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.1
+    container_name: mall-rocketmq-broker
+    restart: unless-stopped
+    depends_on:
+      - rocketmq-namesrv
+    command: sh mqbroker -n rocketmq-namesrv:9876 -c /home/rocketmq/broker.conf
+    environment:
+      JAVA_OPT_EXT: "-Xms256m -Xmx512m -Xmn256m"
+      TZ: Asia/Shanghai
+    ports:
+      - "10909:10909"   # VIP 通道
+      - "10911:10911"   # Broker 主端口
+    volumes:
+      - ./docker/rocketmq/broker.conf:/home/rocketmq/broker.conf:ro
+    networks:
+      - mall-net
+
+  # ---------- 商品搜索：Elasticsearch 8.11.4 + IK 中文分词 ----------
+  elasticsearch:
+    build:
+      context: .
+      dockerfile: docker/elasticsearch/Dockerfile
+    image: mall-seckill-es:8.11.4
+    container_name: mall-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      TZ: Asia/Shanghai
+    ports:
+      # 宿主机 9200 未被占用；容器间用 elasticsearch:9200
+      - "9200:9200"
+    volumes:
+      - mall-es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+    networks:
+      - mall-net
+
+  # ---------- 服务治理：Nacos 注册中心 + 配置中心 ----------
+  nacos:
+    image: nacos/nacos-server:v2.4.3
+    container_name: mall-nacos
+    restart: unless-stopped
+    environment:
+      MODE: standalone
+      NACOS_AUTH_ENABLE: "false"
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      JVM_XMN: 128m
+      TZ: Asia/Shanghai
+    ports:
+      - "8848:8848"   # 控制台/OpenAPI
+      - "9848:9848"   # gRPC
+    volumes:
+      - mall-nacos-data:/home/nacos/data
+      - mall-nacos-logs:/home/nacos/logs
+    networks:
+      - mall-net
+
+  # ---------- 服务治理：Sentinel 控制台（规则持久化在 Nacos） ----------
+  sentinel:
+    image: bladex/sentinel-dashboard:1.8.8
+    container_name: mall-sentinel
+    restart: unless-stopped
+    environment:
+      JAVA_OPTS: "-Dserver.port=8858 -Dcsp.sentinel.dashboard.server=localhost:8858 -Dproject.name=sentinel-dashboard -Dcsp.sentinel.api.port=8719"
+      TZ: Asia/Shanghai
+    ports:
+      - "8858:8858"
     networks:
       - mall-net
 
@@ -173,16 +336,22 @@ services:
       # 内存存储，重启后数据丢失（演示项目足够；生产用 Elasticsearch/MySQL 持久化）
       STORAGE_TYPE: mem
     ports:
-      - "9411:9411"
+      # 9411 在本机被系统保留，宿主端口改用 19411；容器内仍为 9411
+      - "19411:9411"
     networks:
       - mall-net
 
 volumes:
   mall-mysql-data:
+  mall-mysql-order0-data:
+  mall-mysql-order1-data:
   mall-redis-data:
   mall-rabbitmq-data:
   mall-prometheus-data:
   mall-grafana-data:
+  mall-nacos-data:
+  mall-nacos-logs:
+  mall-es-data:
 
 networks:
   mall-net:

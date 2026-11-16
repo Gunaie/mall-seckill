@@ -1,0 +1,121 @@
+# =============================================================
+# ShardingSphere-JDBC 5.5.0 订单域分库分表
+#   逻辑库：mall_seckill
+#   ds0：mall_seckill      （用户/商品/分类/秒杀配置/幂等日志，非分片表）
+#   ds1：mall_order_0      （订单主表/明细/秒杀订单 _0.._3）
+#   ds2：mall_order_1      （订单主表/明细/秒杀订单 _0.._3）
+# 分片键 user_id：库 = user_id % 2，表 = (user_id >> 1) % 4
+# 说明：若库、表都用 user_id 的低位（%2 / %4），因 table 后缀已隐含 user_id 的奇偶性，
+#       ds1 的 _1/_3 与 ds2 的 _0/_2 永远不会有数据，实际只有 4 个分片可用。
+#       这里库取最低位、表取次低 2 位，8 个物理分片都可被均匀使用。
+# 同一用户的订单主表、明细、秒杀关联必然落在同一物理库同一张表，
+# 买家查询单分片路由；管理端按 id/订单号查询会广播到 8 个分片（低流量可接受）。
+#
+# 仅 prod profile 生效：application-prod.yml 中 datasource 指向本文件；
+# dev 仍走单库 mall_seckill，不依赖本配置。
+# =============================================================
+databaseName: mall_seckill
+
+dataSources:
+  ds0:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://mysql:3306/mall_seckill?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root123456
+    maximumPoolSize: 20
+    minimumIdle: 5
+    connectionTimeout: 30000
+  ds1:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://mysql-order-0:3306/mall_order_0?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root123456
+    maximumPoolSize: 20
+    minimumIdle: 5
+    connectionTimeout: 30000
+  ds2:
+    dataSourceClassName: com.zaxxer.hikari.HikariDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    jdbcUrl: jdbc:mysql://mysql-order-1:3306/mall_order_1?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root123456
+    maximumPoolSize: 20
+    minimumIdle: 5
+    connectionTimeout: 30000
+
+rules:
+  - !SHARDING
+    tables:
+      oms_order:
+        actualDataNodes: ds${1..2}.oms_order_${0..3}
+        databaseStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: order-db-mod
+        tableStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: oms-order-table-mod
+      oms_order_item:
+        actualDataNodes: ds${1..2}.oms_order_item_${0..3}
+        databaseStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: order-db-mod
+        tableStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: oms-order-item-table-mod
+      sms_seckill_order:
+        actualDataNodes: ds${1..2}.sms_seckill_order_${0..3}
+        databaseStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: order-db-mod
+        tableStrategy:
+          standard:
+            shardingColumn: user_id
+            shardingAlgorithmName: sms-seckill-order-table-mod
+    shardingAlgorithms:
+      order-db-mod:
+        type: INLINE
+        props:
+          algorithm-expression: ds${user_id % 2 + 1}
+      oms-order-table-mod:
+        type: INLINE
+        props:
+          algorithm-expression: oms_order_${(user_id >> 1) % 4}
+      oms-order-item-table-mod:
+        type: INLINE
+        props:
+          algorithm-expression: oms_order_item_${(user_id >> 1) % 4}
+      sms-seckill-order-table-mod:
+        type: INLINE
+        props:
+          algorithm-expression: sms_seckill_order_${(user_id >> 1) % 4}
+  - !SINGLE
+    # 非分片表显式声明落 ds0：避免用 ds0.* 把订单逻辑表也加载成单表造成元数据冲突
+    tables:
+      - ds0.ums_user
+      - ds0.ums_role
+      - ds0.ums_menu
+      - ds0.ums_user_role
+      - ds0.ums_role_menu
+      - ds0.pms_category
+      - ds0.pms_spu
+      - ds0.pms_sku
+      - ds0.sms_seckill_activity
+      - ds0.sms_seckill_session
+      - ds0.sms_seckill_sku
+      - ds0.mq_consume_log
+    defaultDataSource: ds0
+  - !TRANSACTION
+    # 订单库与主库（库存/幂等日志）跨数据源写入：XA 两阶段提交保证原子性
+    defaultType: XA
+    providerType: Atomikos
+
+props:
+  # 压测关闭 SQL 日志；排查路由时改为 true 并重启应用即可看到 actual SQL
+  sql-show: false

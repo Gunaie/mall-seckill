@@ -24,7 +24,10 @@ public class OmsOrderItem implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
-    @TableId(type = IdType.AUTO)
+    /**
+     * 分片后各物理表独立自增会产生重复 ID，统一由 MyBatis-Plus 雪花算法在客户端生成
+     */
+    @TableId(type = IdType.ASSIGN_ID)
     private Long id;
 
     private Long orderId;

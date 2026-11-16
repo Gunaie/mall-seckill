@@ -68,7 +68,8 @@ public interface OrderService {
      * 超时未支付自动关单（MQ 消费者调用，CAS 幂等，回补库存）
      *
      * @param orderId   订单ID
+     * @param userId    下单用户ID（分片键；旧版本消息可能为空，此时回退广播查询）
      * @param messageId MQ 消息唯一ID，用于 mq_consume_log 消费幂等
      */
-    void closeExpiredOrder(Long orderId, String messageId);
+    void closeExpiredOrder(Long orderId, Long userId, String messageId);
 }

@@ -33,7 +33,7 @@ public class OrderCloseListener {
                           Channel channel,
                           @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag) throws IOException {
         try {
-            orderService.closeExpiredOrder(message.getOrderId(), message.getMessageId());
+            orderService.closeExpiredOrder(message.getOrderId(), message.getUserId(), message.getMessageId());
             channel.basicAck(deliveryTag, false);
         } catch (Exception e) {
             log.error("订单超时关单消费失败, orderId={}, orderSn={}",

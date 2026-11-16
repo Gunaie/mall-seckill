@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.support.AmqpHeaders;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.stereotype.Component;
@@ -16,7 +17,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 
 /**
- * 秒杀下单消费者：DB 条件扣减 + 一人一单兜底 + 订单落库。
+ * 秒杀下单消费者（RabbitMQ 版，mall.rocketmq.enabled=false 时生效）：DB 条件扣减 + 一人一单兜底 + 订单落库。
  * 消费失败时先补偿 Redis 库存，再 basicNack(requeue=false) 将消息路由至死信队列(DLQ)，
  * 由 {@link SeckillOrderDlxListener} 记录告警，避免消息静默丢失或毒消息循环。
  *
@@ -25,6 +26,7 @@ import java.io.IOException;
 @Slf4j
 @Component
 @RequiredArgsConstructor
+@ConditionalOnProperty(prefix = "mall.rocketmq", name = "enabled", havingValue = "false", matchIfMissing = true)
 public class SeckillOrderListener {
 
     private final SeckillService seckillService;

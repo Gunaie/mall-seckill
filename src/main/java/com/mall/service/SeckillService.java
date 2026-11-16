@@ -84,6 +84,9 @@ public interface SeckillService {
 
     /**
      * 秒杀订单取消/超时关单后的库存回补（DB 秒杀库存 + Redis 计数 + 一人一单标记）
+     *
+     * @param orderId 订单ID
+     * @param userId  下单用户ID（sms_seckill_order 分片键）
      */
-    void restoreAfterOrderCancel(Long orderId);
+    void restoreAfterOrderCancel(Long orderId, Long userId);
 }

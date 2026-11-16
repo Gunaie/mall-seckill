@@ -12,7 +12,8 @@ import com.mall.mapper.SmsSeckillOrderMapper;
 import com.mall.metrics.SeckillMetrics;
 import com.mall.model.SeckillSkuCache;
 import com.mall.mq.OrderDelaySender;
-import com.mall.mq.SeckillOrderSender;
+import com.mall.mq.SeckillDispatchStatus;
+import com.mall.mq.SeckillOrderDispatcher;
 import com.mall.mq.message.SeckillOrderMessage;
 import com.mall.security.SecurityUtils;
 import com.mall.service.CaptchaService;
@@ -38,7 +39,6 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -79,7 +79,7 @@ class SeckillServiceImplTest {
     @Mock
     private OrderProperties orderProperties;
     @Mock
-    private SeckillOrderSender seckillOrderSender;
+    private SeckillOrderDispatcher seckillOrderDispatcher;
     @Mock
     private OrderDelaySender orderDelaySender;
     @Mock
@@ -101,7 +101,7 @@ class SeckillServiceImplTest {
         seckillService = new SeckillServiceImpl(
                 null, null, null, seckillOrderMapper, mqConsumeLogMapper, null, null, null, null,
                 redisTemplate, stringRedisTemplate, redissonClient, seckillProperties,
-                orderProperties, seckillOrderSender, orderDelaySender, captchaService, seckillMetrics, localCache);
+                orderProperties, seckillOrderDispatcher, orderDelaySender, captchaService, seckillMetrics, localCache);
         lenient().when(stringRedisTemplate.opsForValue()).thenReturn(valueOps);
         lenient().when(stringRedisTemplate.opsForSet()).thenReturn(setOps);
         lenient().when(redisTemplate.opsForHash()).thenReturn(hashOps);
@@ -127,29 +127,28 @@ class SeckillServiceImplTest {
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> seckillService.execute(SKU_ID, "forged-path", dto));
         assertEquals("秒杀地址无效或已过期，请重新获取", ex.getMessage());
-        // 路径校验失败，不应发送 MQ
-        verify(seckillOrderSender, never()).sendSeckillOrder(any());
+        // 路径校验失败，不应触发本地事务与消息投递
+        verify(seckillOrderDispatcher, never()).dispatch(any());
     }
 
     @Test
     @DisplayName("execute-1 本地售罄标记命中 -> 直接拒绝，0 网络 IO")
     void execute_soldOutLocal() {
         when(valueOps.get(pathKey())).thenReturn("valid-path");
-        // 先打一次让 Lua 返回 0，触发本地售罄标记置位
+        // 先打一次让本地事务返回售罄，触发本地售罄标记置位
         when(valueOps.get(sessionKey())).thenReturn("5");
         when(hashOps.get(anyString(), anyString())).thenReturn(validCache());
-        when(stringRedisTemplate.execute(any(), anyList(), anyString(), anyString()))
-                .thenReturn(0L);
+        when(seckillOrderDispatcher.dispatch(any())).thenReturn(SeckillDispatchStatus.SOLD_OUT);
 
         SeckillExecuteDTO dto = new SeckillExecuteDTO();
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> seckillService.execute(SKU_ID, "valid-path", dto));
         assertEquals("已抢光，下次早点来~", ex.getMessage());
 
-        // 第二次请求：本地标记命中，不再执行 Lua
+        // 第二次请求：本地标记命中，不再走本地事务
         assertThrows(BusinessException.class,
                 () -> seckillService.execute(SKU_ID, "valid-path", dto));
-        verify(stringRedisTemplate, times(1)).execute(any(), anyList(), anyString(), anyString());
+        verify(seckillOrderDispatcher, times(1)).dispatch(any());
     }
 
     @Test
@@ -165,13 +164,12 @@ class SeckillServiceImplTest {
     }
 
     @Test
-    @DisplayName("execute-3 Lua 返回 0 库存不足 -> 拒绝并置本地售罄标记")
+    @DisplayName("execute-3 本地事务返回库存不足 -> 拒绝并置本地售罄标记")
     void execute_soldOut() {
         when(valueOps.get(pathKey())).thenReturn("valid-path");
         when(valueOps.get(sessionKey())).thenReturn("5");
         when(hashOps.get(anyString(), anyString())).thenReturn(validCache());
-        when(stringRedisTemplate.execute(any(), anyList(), anyString(), anyString()))
-                .thenReturn(0L);
+        when(seckillOrderDispatcher.dispatch(any())).thenReturn(SeckillDispatchStatus.SOLD_OUT);
 
         SeckillExecuteDTO dto = new SeckillExecuteDTO();
         assertThrows(BusinessException.class,
@@ -180,29 +178,26 @@ class SeckillServiceImplTest {
     }
 
     @Test
-    @DisplayName("execute-4 Lua 返回 -1 重复购买 -> 拒绝（一人一单）")
+    @DisplayName("execute-4 本地事务返回重复购买 -> 拒绝（一人一单）")
     void execute_repeated() {
         when(valueOps.get(pathKey())).thenReturn("valid-path");
         when(valueOps.get(sessionKey())).thenReturn("5");
         when(hashOps.get(anyString(), anyString())).thenReturn(validCache());
-        when(stringRedisTemplate.execute(any(), anyList(), anyString(), anyString()))
-                .thenReturn(-1L);
+        when(seckillOrderDispatcher.dispatch(any())).thenReturn(SeckillDispatchStatus.REPEATED);
 
         SeckillExecuteDTO dto = new SeckillExecuteDTO();
         BusinessException ex = assertThrows(BusinessException.class,
                 () -> seckillService.execute(SKU_ID, "valid-path", dto));
         assertEquals("您已抢购过该商品，请勿重复抢购", ex.getMessage());
-        verify(seckillOrderSender, never()).sendSeckillOrder(any());
     }
 
     @Test
-    @DisplayName("execute-5 Lua 返回 1 -> 发送 MQ，返回 QUEUING")
+    @DisplayName("execute-5 本地事务成功 -> 消息投递完成，返回 QUEUING")
     void execute_queued() {
         when(valueOps.get(pathKey())).thenReturn("valid-path");
         when(valueOps.get(sessionKey())).thenReturn("5");
         when(hashOps.get(anyString(), anyString())).thenReturn(validCache());
-        when(stringRedisTemplate.execute(any(), anyList(), anyString(), anyString()))
-                .thenReturn(1L);
+        when(seckillOrderDispatcher.dispatch(any())).thenReturn(SeckillDispatchStatus.QUEUED);
 
         SeckillExecuteDTO dto = new SeckillExecuteDTO();
         dto.setReceiverName("张三");
@@ -212,7 +207,7 @@ class SeckillServiceImplTest {
         SeckillResultVO vo = seckillService.execute(SKU_ID, "valid-path", dto);
         assertEquals(SeckillResultVO.STATUS_QUEUING, vo.getStatus());
 
-        verify(seckillOrderSender, times(1)).sendSeckillOrder(any(SeckillOrderMessage.class));
+        verify(seckillOrderDispatcher, times(1)).dispatch(any(SeckillOrderMessage.class));
     }
 
     // ============================ 动态路径换取 ============================

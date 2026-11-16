@@ -20,6 +20,7 @@ import com.mall.entity.PmsSpu;
 import com.mall.mapper.PmsCategoryMapper;
 import com.mall.mapper.PmsSkuMapper;
 import com.mall.mapper.PmsSpuMapper;
+import com.mall.search.SpuChangedEvent;
 import com.mall.service.PmsSpuService;
 import com.mall.vo.SkuVO;
 import com.mall.vo.SpuDetailVO;
@@ -29,6 +30,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.BeanUtils;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
@@ -63,6 +65,8 @@ public class PmsSpuServiceImpl extends ServiceImpl<PmsSpuMapper, PmsSpu> impleme
     private final ObjectMapper objectMapper;
     /** 本地一级缓存（Caffeine），热数据命中后零网络 IO */
     private final Cache<String, Object> localCache;
+    /** 商品变更事件：事务提交后异步同步 ES */
+    private final ApplicationEventPublisher eventPublisher;
 
     @Override
     public PageResult<SpuPageVO> pageOnSale(SpuPageQuery query) {
@@ -179,6 +183,7 @@ public class PmsSpuServiceImpl extends ServiceImpl<PmsSpuMapper, PmsSpu> impleme
         } catch (DuplicateKeyException e) {
             throw new BusinessException("SKU 编码重复，请检查后重试");
         }
+        publishSpuChanged(spu.getId(), SpuChangedEvent.Type.UPSERT);
         return spu.getId();
     }
 
@@ -207,6 +212,7 @@ public class PmsSpuServiceImpl extends ServiceImpl<PmsSpuMapper, PmsSpu> impleme
         }
         // Cache Aside：先更新库，再删除缓存，下次查询触发重建
         evictDetailCache(dto.getId());
+        publishSpuChanged(dto.getId(), SpuChangedEvent.Type.UPSERT);
     }
 
     @Override
@@ -219,6 +225,7 @@ public class PmsSpuServiceImpl extends ServiceImpl<PmsSpuMapper, PmsSpu> impleme
         baseMapper.deleteById(id);
         skuMapper.delete(Wrappers.<PmsSku>lambdaQuery().eq(PmsSku::getSpuId, id));
         evictDetailCache(id);
+        publishSpuChanged(id, SpuChangedEvent.Type.DELETE);
     }
 
     // ============================== 私有方法 ==============================
@@ -321,6 +328,13 @@ public class PmsSpuServiceImpl extends ServiceImpl<PmsSpuMapper, PmsSpu> impleme
         Boolean deleted = redisTemplate.delete(cacheKey);
         localCache.invalidate(cacheKey);
         log.info("商品变更，删除详情缓存 spuId={}, redisDeleted={}", id, Boolean.TRUE.equals(deleted));
+    }
+
+    /**
+     * 发布商品变更事件：事务提交后由 SpuIndexSyncService 异步同步 ES
+     */
+    private void publishSpuChanged(Long id, SpuChangedEvent.Type type) {
+        eventPublisher.publishEvent(new SpuChangedEvent(id, type));
     }
 
     private String toJson(Object obj) {

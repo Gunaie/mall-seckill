@@ -198,14 +198,14 @@ public class OrderServiceImpl implements OrderService {
         cartService.removeSelected(userId);
 
         // 8. 本地事务提交成功后再投递延迟消息，避免「事务回滚但消息已发出」的误关单
-        registerDelayCloseAfterCommit(order.getId(), order.getOrderSn());
+        registerDelayCloseAfterCommit(order.getId(), order.getOrderSn(), order.getUserId());
 
         OrderCreateVO vo = new OrderCreateVO();
         vo.setOrderId(order.getId());
         vo.setOrderSn(order.getOrderSn());
         vo.setTotalAmount(totalAmount);
         vo.setExpireTime(order.getExpireTime());
-        log.info("订单创建成功, orderId={}, orderSn={}, totalAmount={}", order.getId(), order.getOrderSn(), totalAmount);
+        log.debug("订单创建成功, orderId={}, orderSn={}, totalAmount={}", order.getId(), order.getOrderSn(), totalAmount);
         return vo;
     }
 
@@ -214,8 +214,9 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void pay(Long id) {
-        OmsOrder order = loadOwnedOrder(id, SecurityUtils.getCurrentUserId());
-        int rows = orderMapper.payIfPending(id);
+        Long userId = SecurityUtils.getCurrentUserId();
+        OmsOrder order = loadOwnedOrder(id, userId);
+        int rows = orderMapper.payIfPending(id, userId);
         if (rows == 0) {
             throw new BusinessException("订单状态为「" + OrderStatus.descOf(order.getStatus()) + "」，不能支付");
         }
@@ -227,7 +228,7 @@ public class OrderServiceImpl implements OrderService {
     public void cancel(Long id) {
         Long userId = SecurityUtils.getCurrentUserId();
         OmsOrder order = loadOwnedOrder(id, userId);
-        int rows = orderMapper.cancelIfPending(id, "用户主动取消");
+        int rows = orderMapper.cancelIfPending(id, userId, "用户主动取消");
         if (rows == 0) {
             throw new BusinessException("订单状态为「" + OrderStatus.descOf(order.getStatus()) + "」，不能取消");
         }
@@ -238,11 +239,12 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void ship(Long id) {
+        // 管理端只持有订单ID，先广播查出 userId，再用分片键路由更新（仅一次广播）
         OmsOrder order = orderMapper.selectById(id);
         if (order == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "订单不存在");
         }
-        int rows = orderMapper.shipIfPaid(id);
+        int rows = orderMapper.shipIfPaid(id, order.getUserId());
         if (rows == 0) {
             throw new BusinessException("订单状态为「" + OrderStatus.descOf(order.getStatus()) + "」，不能发货");
         }
@@ -252,8 +254,9 @@ public class OrderServiceImpl implements OrderService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void confirm(Long id) {
-        OmsOrder order = loadOwnedOrder(id, SecurityUtils.getCurrentUserId());
-        int rows = orderMapper.completeIfShipped(id);
+        Long userId = SecurityUtils.getCurrentUserId();
+        OmsOrder order = loadOwnedOrder(id, userId);
+        int rows = orderMapper.completeIfShipped(id, userId);
         if (rows == 0) {
             throw new BusinessException("订单状态为「" + OrderStatus.descOf(order.getStatus()) + "」，不能确认收货");
         }
@@ -262,19 +265,23 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void closeExpiredOrder(Long orderId, String messageId) {
+    public void closeExpiredOrder(Long orderId, Long userId, String messageId) {
         // MQ 消费幂等：同一条关单消息只处理一次，防止重复关单/重复回补库存
         if (mqConsumeLogMapper.tryConsume(messageId, MqConstants.ORDER_CLOSE_QUEUE) == 0) {
             log.info("关单消息已消费，幂等跳过, messageId={}, orderId={}", messageId, orderId);
             return;
         }
-        OmsOrder order = orderMapper.selectById(orderId);
+        // 带 user_id 查询路由到唯一分片；旧版本消息无 userId 时回退广播查询
+        OmsOrder order = userId == null ? orderMapper.selectById(orderId)
+                : orderMapper.selectOne(Wrappers.<OmsOrder>lambdaQuery()
+                        .eq(OmsOrder::getId, orderId)
+                        .eq(OmsOrder::getUserId, userId));
         // 幂等关单：不存在直接忽略；非待支付（已支付/已取消）直接跳过
         if (order == null || !Objects.equals(order.getStatus(), OrderStatus.PENDING_PAY.getCode())) {
             log.info("延迟关单跳过（订单不存在或非待支付）, orderId={}", orderId);
             return;
         }
-        int rows = orderMapper.cancelIfPending(orderId, "超时未支付，系统自动取消");
+        int rows = orderMapper.cancelIfPending(orderId, order.getUserId(), "超时未支付，系统自动取消");
         if (rows == 0) {
             // 与支付/用户取消并发，CAS 落败者直接结束
             log.info("延迟关单 CAS 未命中（订单刚被支付或取消）, orderId={}", orderId);
@@ -290,16 +297,17 @@ public class OrderServiceImpl implements OrderService {
     public OrderDetailVO detail(Long id) {
         Long userId = SecurityUtils.getCurrentUserId();
         OmsOrder order = loadOwnedOrder(id, userId);
-        return toDetailVO(order, null);
+        return toDetailVO(order, null, userId);
     }
 
     @Override
     public OrderDetailVO adminDetail(Long id) {
+        // 管理端只持有订单ID，无法避免一次 8 分片广播查询
         OmsOrder order = orderMapper.selectById(id);
         if (order == null) {
             throw new BusinessException(ResultCode.NOT_FOUND, "订单不存在");
         }
-        return toDetailVO(order, usernameMap(Set.of(order.getUserId())));
+        return toDetailVO(order, usernameMap(Set.of(order.getUserId())), order.getUserId());
     }
 
     @Override
@@ -309,7 +317,8 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     public PageResult<OrderVO> adminPage(OrderPageQuery query) {
-        return doPage(query, null);
+        // 管理端传入 userId 时按分片键路由；不传则广播 8 个分片（低流量可接受）
+        return doPage(query, query.getUserId());
     }
 
     // ============================== 私有方法 ==============================
@@ -327,10 +336,12 @@ public class OrderServiceImpl implements OrderService {
             return PageResult.of(page, Collections.emptyList());
         }
 
-        // 批量查明细并按订单分组，避免 N+1
+        // 批量查明细并按订单分组，避免 N+1；带 user_id 时明细查询同样只打一个分片
         Set<Long> orderIds = records.stream().map(OmsOrder::getId).collect(Collectors.toSet());
         Map<Long, List<OrderItemVO>> itemMap = orderItemMapper.selectList(
-                        Wrappers.<OmsOrderItem>lambdaQuery().in(OmsOrderItem::getOrderId, orderIds)).stream()
+                        Wrappers.<OmsOrderItem>lambdaQuery()
+                                .in(OmsOrderItem::getOrderId, orderIds)
+                                .eq(userId != null, OmsOrderItem::getUserId, userId)).stream()
                 .collect(Collectors.groupingBy(OmsOrderItem::getOrderId,
                         Collectors.mapping(this::toItemVO, Collectors.toList())));
 
@@ -357,21 +368,25 @@ public class OrderServiceImpl implements OrderService {
                 .collect(Collectors.toMap(UmsUser::getId, UmsUser::getUsername));
     }
 
+    /**
+     * 买家视角加载订单：id + user_id 双条件，路由到该用户唯一物理分片，
+     * 同时避免把「订单是否存在」暴露给其他用户。
+     */
     private OmsOrder loadOwnedOrder(Long id, Long userId) {
-        OmsOrder order = orderMapper.selectById(id);
+        OmsOrder order = orderMapper.selectOne(Wrappers.<OmsOrder>lambdaQuery()
+                .eq(OmsOrder::getId, id)
+                .eq(OmsOrder::getUserId, userId));
         if (order == null) {
-            throw new BusinessException(ResultCode.NOT_FOUND, "订单不存在");
-        }
-        if (!Objects.equals(order.getUserId(), userId)) {
-            // 不向其他用户暴露订单是否存在
             throw new BusinessException(ResultCode.NOT_FOUND, "订单不存在");
         }
         return order;
     }
 
-    private void restoreStockByOrder(Long orderId) {
+    private void restoreStockByOrder(Long orderId, Long userId) {
         List<OmsOrderItem> items = orderItemMapper.selectList(
-                Wrappers.<OmsOrderItem>lambdaQuery().eq(OmsOrderItem::getOrderId, orderId));
+                Wrappers.<OmsOrderItem>lambdaQuery()
+                        .eq(OmsOrderItem::getOrderId, orderId)
+                        .eq(userId != null, OmsOrderItem::getUserId, userId));
         for (OmsOrderItem item : items) {
             skuMapper.restoreStock(item.getSkuId(), item.getQuantity());
         }
@@ -383,22 +398,22 @@ public class OrderServiceImpl implements OrderService {
      */
     private void restoreStockForOrder(OmsOrder order) {
         if (Objects.equals(order.getOrderType(), 2)) {
-            seckillService.restoreAfterOrderCancel(order.getId());
+            seckillService.restoreAfterOrderCancel(order.getId(), order.getUserId());
             return;
         }
-        restoreStockByOrder(order.getId());
+        restoreStockByOrder(order.getId(), order.getUserId());
     }
 
-    private void registerDelayCloseAfterCommit(Long orderId, String orderSn) {
+    private void registerDelayCloseAfterCommit(Long orderId, String orderSn, Long userId) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    orderDelaySender.sendDelayClose(new OrderDelayMessage(orderId, orderSn));
+                    orderDelaySender.sendDelayClose(new OrderDelayMessage(orderId, orderSn, userId));
                 }
             });
         } else {
-            orderDelaySender.sendDelayClose(new OrderDelayMessage(orderId, orderSn));
+            orderDelaySender.sendDelayClose(new OrderDelayMessage(orderId, orderSn, userId));
         }
     }
 
@@ -406,7 +421,7 @@ public class OrderServiceImpl implements OrderService {
         return CacheConstants.ORDER_TOKEN_KEY_PREFIX + userId + ":" + token;
     }
 
-    private OrderDetailVO toDetailVO(OmsOrder order, Map<Long, String> usernameMap) {
+    private OrderDetailVO toDetailVO(OmsOrder order, Map<Long, String> usernameMap, Long userId) {
         OrderDetailVO vo = new OrderDetailVO();
         BeanUtils.copyProperties(order, vo);
         vo.setStatusDesc(OrderStatus.descOf(order.getStatus()));
@@ -414,7 +429,9 @@ public class OrderServiceImpl implements OrderService {
             vo.setUsername(usernameMap.get(order.getUserId()));
         }
         List<OrderItemVO> items = orderItemMapper.selectList(
-                        Wrappers.<OmsOrderItem>lambdaQuery().eq(OmsOrderItem::getOrderId, order.getId())).stream()
+                        Wrappers.<OmsOrderItem>lambdaQuery()
+                                .eq(OmsOrderItem::getOrderId, order.getId())
+                                .eq(userId != null, OmsOrderItem::getUserId, userId)).stream()
                 .map(this::toItemVO)
                 .toList();
         vo.setItems(items);

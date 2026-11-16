@@ -1,5 +1,14 @@
 # 开发环境配置
 spring:
+  # 本地开发默认不依赖 Nacos/Sentinel；需要联调时显式开启
+  cloud:
+    nacos:
+      discovery:
+        enabled: false
+      config:
+        enabled: false
+    sentinel:
+      enabled: false
   data:
     redis:
       # 容器 Redis 宿主机映射端口为 6380
@@ -15,6 +24,11 @@ spring:
           max-idle: 8
           min-idle: 2
           max-wait: 3000ms
+  # 商品搜索：本地默认连宿主机 ES（未启动时搜索自动降级 DB）
+  elasticsearch:
+    uris: ${ES_URIS:http://localhost:9200}
+    connection-timeout: 2s
+    socket-timeout: 3s
   # RabbitMQ（订单超时延迟关单 / 秒杀异步下单）
   rabbitmq:
     host: localhost
@@ -90,6 +104,10 @@ mall:
   seckill:
     # 本地内存售罄标记开关；压测对比时置 false 重启，观察 QPS 差异
     local-mark-enabled: true
+    # 本地售罄标记 TTL（秒）：多实例补货后靠 TTL 自动恢复，0 表示永不过期
+    local-mark-ttl-seconds: 10
+    # 秒杀商品信息本地缓存 TTL（秒）：省掉热路径 2 次 Redis 往返，0 表示关闭
+    sku-local-cache-seconds: 5
     # 秒杀结果轮询 key 有效期（秒）
     result-ttl-seconds: 600
     # 当日场次列表缓存 TTL（秒）
@@ -109,6 +127,14 @@ mall:
     access-token-expiration: 7200
     # refresh token 有效期：7 天（秒）
     refresh-token-expiration: 604800
+  # 商品搜索：本地无 IK 插件时自动降级 standard
+  search:
+    enabled: true
+    index-name: pms_spu
+    analyzer: ik_max_word
+    search-analyzer: ik_smart
+    compensate-interval-ms: 10000
+    timeout-ms: 2000
 
 logging:
   level:

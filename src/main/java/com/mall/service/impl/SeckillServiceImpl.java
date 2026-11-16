@@ -34,7 +34,8 @@ import com.mall.mapper.SmsSeckillSkuMapper;
 import com.mall.mapper.MqConsumeLogMapper;
 import com.mall.model.SeckillSkuCache;
 import com.mall.mq.OrderDelaySender;
-import com.mall.mq.SeckillOrderSender;
+import com.mall.mq.SeckillDispatchStatus;
+import com.mall.mq.SeckillOrderDispatcher;
 import com.mall.mq.message.OrderDelayMessage;
 import com.mall.mq.message.SeckillOrderMessage;
 import com.mall.metrics.SeckillMetrics;
@@ -46,13 +47,14 @@ import com.mall.vo.SeckillResultVO;
 import com.mall.vo.SeckillSessionVO;
 import com.mall.vo.SeckillSkuVO;
 import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.DigestUtils;
@@ -61,6 +63,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -111,7 +114,7 @@ public class SeckillServiceImpl implements SeckillService {
     private final RedissonClient redissonClient;
     private final SeckillProperties seckillProperties;
     private final OrderProperties orderProperties;
-    private final SeckillOrderSender seckillOrderSender;
+    private final SeckillOrderDispatcher seckillOrderDispatcher;
     private final OrderDelaySender orderDelaySender;
     private final CaptchaService captchaService;
     private final SeckillMetrics seckillMetrics;
@@ -122,34 +125,46 @@ public class SeckillServiceImpl implements SeckillService {
     private final Cache<String, Object> localCache;
 
     /**
-     * 本地内存售罄标记：seckillSkuId -> true。
+     * 本地内存售罄标记：seckillSkuId -> 过期时间戳（毫秒）。
      * 库存抢空后置位，后续请求直接在应用内存层拒绝，不再消耗 Redis 带宽；
-     * 重新预热或库存回补时清除。
+     * 标记带 TTL，多实例下补货后各实例可在 TTL 内自动恢复，不会长期误拒。
      */
-    private final ConcurrentHashMap<Long, Boolean> localSoldOutMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Long> localSoldOutMap = new ConcurrentHashMap<>();
+
+    private boolean isLocalSoldOut(Long seckillSkuId) {
+        Long expireAt = localSoldOutMap.get(seckillSkuId);
+        if (expireAt == null) {
+            return false;
+        }
+        if (expireAt <= System.currentTimeMillis()) {
+            localSoldOutMap.remove(seckillSkuId, expireAt);
+            return false;
+        }
+        return true;
+    }
+
+    private void markLocalSoldOut(Long seckillSkuId) {
+        long ttl = seckillProperties.getLocalMarkTtlSeconds();
+        localSoldOutMap.put(seckillSkuId,
+                ttl <= 0 ? Long.MAX_VALUE : System.currentTimeMillis() + ttl * 1000);
+    }
 
     /**
-     * Redis 预减库存 Lua（原子性保证不超卖）：
-     * KEYS[1]=库存计数, KEYS[2]=已购集合；ARGV[1]=购买数量, ARGV[2]=用户ID
-     * 返回 -1 重复购买 / 0 库存不足 / 1 预减成功（计数减 1 + 用户加入已购集合）
+     * 秒杀商品信息本地缓存：TTL 内直接返回，省掉「场次索引 + hash 详情」2 次 Redis 往返。
+     * 商品信息/时间窗最长滞后 {@code mall.seckill.sku-local-cache-seconds}。
      */
-    private static final DefaultRedisScript<Long> PRE_DEDUCT_SCRIPT;
+    private Cache<Long, SeckillSkuCache> skuCache;
 
-    static {
-        DefaultRedisScript<Long> script = new DefaultRedisScript<>();
-        script.setScriptText(
-                "if redis.call('sismember', KEYS[2], ARGV[2]) == 1 then " +
-                "    return -1 " +
-                "end " +
-                "local stock = tonumber(redis.call('get', KEYS[1])) " +
-                "if stock == nil or stock < tonumber(ARGV[1]) then " +
-                "    return 0 " +
-                "end " +
-                "redis.call('decrby', KEYS[1], ARGV[1]) " +
-                "redis.call('sadd', KEYS[2], ARGV[2]) " +
-                "return 1");
-        script.setResultType(Long.class);
-        PRE_DEDUCT_SCRIPT = script;
+    @PostConstruct
+    void initSkuCache() {
+        long ttl = seckillProperties.getSkuLocalCacheSeconds();
+        if (ttl <= 0) {
+            return;
+        }
+        skuCache = Caffeine.newBuilder()
+                .maximumSize(2048)
+                .expireAfterWrite(Duration.ofSeconds(ttl))
+                .build();
     }
 
     // ============================== 用户端 ==============================
@@ -299,21 +314,20 @@ public class SeckillServiceImpl implements SeckillService {
         Timer.Sample sample = seckillMetrics.startTimer();
         String outcome = SeckillMetrics.EXECUTE_ERROR;
         try {
-            // 0. 动态路径校验：未通过验证码换取路径/路径过期/伪造路径一律拦截
+            // 0. 本地内存售罄标记：最先判断，命中直接拒绝，业务侧 0 Redis 往返
+            if (seckillProperties.isLocalMarkEnabled() && isLocalSoldOut(seckillSkuId)) {
+                outcome = SeckillMetrics.EXECUTE_SOLD_OUT_LOCAL;
+                throw new BusinessException("已抢光，下次早点来~");
+            }
+
+            // 1. 动态路径校验：未通过验证码换取路径/路径过期/伪造路径一律拦截
             String savedPath = stringRedisTemplate.opsForValue().get(pathKey(userId, seckillSkuId));
             if (savedPath == null || !savedPath.equals(path)) {
                 outcome = SeckillMetrics.EXECUTE_INVALID_PATH;
                 throw new BusinessException("秒杀地址无效或已过期，请重新获取");
             }
 
-            // 1. 本地内存售罄标记：命中直接拒绝，0 网络 IO
-            if (seckillProperties.isLocalMarkEnabled()
-                    && Boolean.TRUE.equals(localSoldOutMap.get(seckillSkuId))) {
-                outcome = SeckillMetrics.EXECUTE_SOLD_OUT_LOCAL;
-                throw new BusinessException("已抢光，下次早点来~");
-            }
-
-            // 2. 秒杀商品信息全部来自预热缓存（应用不打商品库），校验时间窗口
+            // 2. 秒杀商品信息来自预热缓存（本地 Caffeine 优先，未命中再查 Redis），校验时间窗口
             SeckillSkuCache cache = loadCache(seckillSkuId);
             if (cache == null) {
                 outcome = SeckillMetrics.EXECUTE_INVALID;
@@ -325,28 +339,28 @@ public class SeckillServiceImpl implements SeckillService {
                 throw new BusinessException("不在秒杀时间范围内，开抢时间：" + cache.getStartTime());
             }
 
-            // 3. Lua 原子操作：一人一单判重 + 库存预减（-1 重复 / 0 抢空 / 1 成功）
-            Long result = stringRedisTemplate.execute(PRE_DEDUCT_SCRIPT,
-                    List.of(stockKey(seckillSkuId), orderedSetKey(seckillSkuId)),
-                    "1", String.valueOf(userId));
-            if (result == null || result == 0L) {
+            // 3. 本地事务（Redis Lua 预减 + 一人一单判重）+ 下单消息投递：
+            //    RocketMQ 事务消息模式下为「半消息 -> 本地事务 -> commit/rollback」，Broker 未确认时回查 Redis 标记
+            SeckillDispatchStatus dispatchStatus = seckillOrderDispatcher.dispatch(
+                    new SeckillOrderMessage(userId, seckillSkuId,
+                            dto.getReceiverName(), dto.getReceiverPhone(), dto.getReceiverAddress(), dto.getRemark()));
+            if (dispatchStatus == SeckillDispatchStatus.SOLD_OUT) {
                 // 售罄置本地标记，后续同类请求不再打 Redis
-                localSoldOutMap.put(seckillSkuId, Boolean.TRUE);
+                markLocalSoldOut(seckillSkuId);
                 outcome = SeckillMetrics.EXECUTE_SOLD_OUT;
                 throw new BusinessException("已抢光，下次早点来~");
             }
-            if (result == -1L) {
+            if (dispatchStatus == SeckillDispatchStatus.REPEATED) {
                 outcome = SeckillMetrics.EXECUTE_REPEATED;
                 throw new BusinessException("您已抢购过该商品，请勿重复抢购");
             }
+            if (dispatchStatus != SeckillDispatchStatus.QUEUED) {
+                // 半消息发送失败 / 本地事务未执行，库存未预减，用户可重试
+                outcome = SeckillMetrics.EXECUTE_ERROR;
+                throw new BusinessException("系统繁忙，请稍后重试");
+            }
 
-            // 清除上次抢购的结果 key，避免前端轮询读到旧结果
-            stringRedisTemplate.delete(resultKey(userId, seckillSkuId));
-
-            // 4. MQ 异步下单（削峰），接口立即返回排队中，前端轮询结果
-            seckillOrderSender.sendSeckillOrder(new SeckillOrderMessage(userId, seckillSkuId,
-                    dto.getReceiverName(), dto.getReceiverPhone(), dto.getReceiverAddress(), dto.getRemark()));
-
+            // 4. 接口立即返回排队中，前端轮询结果 key 感知落单成败
             SeckillResultVO vo = new SeckillResultVO();
             vo.setStatus(SeckillResultVO.STATUS_QUEUING);
             outcome = SeckillMetrics.EXECUTE_QUEUED;
@@ -481,7 +495,7 @@ public class SeckillServiceImpl implements SeckillService {
 
         // 事务提交成功后：发延迟关单消息 + 写结果 key（前端轮询感知成功）
         registerAfterCommit(order.getId(), order.getOrderSn(), message);
-        log.info("秒杀下单成功, userId={}, seckillSkuId={}, orderSn={}", userId, seckillSkuId, order.getOrderSn());
+        log.debug("秒杀下单成功, userId={}, seckillSkuId={}, orderSn={}", userId, seckillSkuId, order.getOrderSn());
     }
 
     @Override
@@ -615,6 +629,10 @@ public class SeckillServiceImpl implements SeckillService {
                 String.valueOf(ss.getId()), cache);
         // 清除本地售罄标记，允许继续抢购
         localSoldOutMap.remove(ss.getId());
+        // 失效本地商品信息缓存，保证下次执行读到最新时间窗/价格
+        if (skuCache != null) {
+            skuCache.invalidate(ss.getId());
+        }
         // 失效该场次的 SKU 列表本地缓存（Cache Aside），下次查询触发重建
         localCache.invalidate("seckill:skus:list:" + ss.getSessionId());
         log.info("秒杀商品预热完成, seckillSkuId={}, sessionId={}, remaining={}", ss.getId(), ss.getSessionId(), remaining);
@@ -623,9 +641,13 @@ public class SeckillServiceImpl implements SeckillService {
     // ============================== 订单联动 ==============================
 
     @Override
-    public void restoreAfterOrderCancel(Long orderId) {
+    public void restoreAfterOrderCancel(Long orderId, Long userId) {
+        // 带 user_id 查询/删除：路由到该用户唯一物理分片，避免 8 分片广播
         SmsSeckillOrder seckillOrder = seckillOrderMapper.selectOne(
-                Wrappers.<SmsSeckillOrder>lambdaQuery().eq(SmsSeckillOrder::getOrderId, orderId).last("LIMIT 1"));
+                Wrappers.<SmsSeckillOrder>lambdaQuery()
+                        .eq(SmsSeckillOrder::getOrderId, orderId)
+                        .eq(userId != null, SmsSeckillOrder::getUserId, userId)
+                        .last("LIMIT 1"));
         if (seckillOrder == null) {
             // 非秒杀订单，交由调用方走普通库存回补
             return;
@@ -634,22 +656,31 @@ public class SeckillServiceImpl implements SeckillService {
         seckillSkuMapper.restoreSeckillStock(seckillOrder.getSeckillSkuId(), quantity);
         // 删除秒杀订单关联记录：该表只承载有效抢购关系（uk_user_sku 唯一约束），
         // 不删除会导致取消后复购被消费端判重拦截、唯一索引插入失败
-        seckillOrderMapper.deleteById(seckillOrder.getId());
+        seckillOrderMapper.delete(Wrappers.<SmsSeckillOrder>lambdaQuery()
+                .eq(SmsSeckillOrder::getId, seckillOrder.getId())
+                .eq(SmsSeckillOrder::getUserId, seckillOrder.getUserId()));
         stringRedisTemplate.opsForValue().increment(stockKey(seckillOrder.getSeckillSkuId()), quantity);
         stringRedisTemplate.opsForSet().remove(orderedSetKey(seckillOrder.getSeckillSkuId()),
                 String.valueOf(seckillOrder.getUserId()));
         // 库存回补后清除售罄标记，允许继续抢购
         localSoldOutMap.remove(seckillOrder.getSeckillSkuId());
-        log.info("秒杀订单取消回补库存, orderId={}, seckillSkuId={}, quantity={}",
-                orderId, seckillOrder.getSeckillSkuId(), quantity);
+        log.info("秒杀订单取消回补库存, orderId={}, userId={}, seckillSkuId={}, quantity={}",
+                orderId, seckillOrder.getUserId(), seckillOrder.getSeckillSkuId(), quantity);
     }
 
     // ============================== 私有方法 ==============================
 
     /**
-     * 从预热缓存加载秒杀商品信息；执行路径需要先用索引定位场次
+     * 从预热缓存加载秒杀商品信息；本地 Caffeine 命中则零网络 IO。
+     * 执行路径需要先用索引定位场次。
      */
     private SeckillSkuCache loadCache(Long seckillSkuId) {
+        if (skuCache != null) {
+            SeckillSkuCache local = skuCache.getIfPresent(seckillSkuId);
+            if (local != null) {
+                return local;
+            }
+        }
         String sessionId = stringRedisTemplate.opsForValue()
                 .get(CacheConstants.SECKILL_SKU_SESSION_KEY + seckillSkuId);
         if (sessionId == null) {
@@ -657,7 +688,13 @@ public class SeckillServiceImpl implements SeckillService {
         }
         Object cache = redisTemplate.opsForHash().get(CacheConstants.SECKILL_SKUS_HASH_KEY + sessionId,
                 String.valueOf(seckillSkuId));
-        return cache instanceof SeckillSkuCache c ? c : null;
+        if (cache instanceof SeckillSkuCache c) {
+            if (skuCache != null) {
+                skuCache.put(seckillSkuId, c);
+            }
+            return c;
+        }
+        return null;
     }
 
     /**
@@ -707,7 +744,7 @@ public class SeckillServiceImpl implements SeckillService {
      */
     private void registerAfterCommit(Long orderId, String orderSn, SeckillOrderMessage message) {
         Runnable afterCommitTask = () -> {
-            orderDelaySender.sendDelayClose(new OrderDelayMessage(orderId, orderSn));
+            orderDelaySender.sendDelayClose(new OrderDelayMessage(orderId, orderSn, message.getUserId()));
             stringRedisTemplate.opsForValue().set(resultKey(message.getUserId(), message.getSeckillSkuId()),
                     String.valueOf(orderId), seckillProperties.getResultTtlSeconds(), TimeUnit.SECONDS);
             // 仅事务真正提交后才计成功，避免回滚造成指标虚高
