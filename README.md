@@ -1,10 +1,10 @@
 # mall-seckill 电商交易与秒杀系统
 
-基于 Spring Boot 3 的高并发秒杀系统，覆盖商品、购物车、订单、秒杀全链路，采用 Redis Lua 原子预减、本地内存售罄标记、RabbitMQ 异步下单、Nginx 双实例负载均衡与 Prometheus 可观测体系。
+基于 Spring Boot 3 的高并发秒杀与交易中台：Redis Lua 原子预减、本地内存售罄标记、RocketMQ 事务消息异步下单、ShardingSphere 订单域分库分表、Elasticsearch + IK 商品搜索、Nacos/Sentinel 服务治理、Nginx 双实例负载均衡与 Prometheus 可观测体系。
 
 ![Java](https://img.shields.io/badge/Java-17-orange)
 ![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.5-brightgreen)
-![Tests](https://img.shields.io/badge/tests-66%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-71%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ---
@@ -31,35 +31,29 @@
 ## 系统架构
 
 ```
-                    ┌─────────────┐
-   Client  ───────▶ │   Nginx     │  (轮询负载均衡, 8090)
-                    └──────┬──────┘
-           ┌───────────────┼───────────────┐
-           ▼               ▼               ▼
-   ┌────────────┐  ┌────────────┐
-   │  app1      │  │  app2      │   Spring Boot 双实例
-   │ (JVM 标记) │  │ (JVM 标记) │   本地售罄标记各实例独立
-   └─────┬──────┘  └─────┬──────┘
-         │               │
-   ┌─────▼───────────────▼──────┐
-   │       Redis 7              │  Lua 原子预减 + 一人一单 + 滑动窗口限流
-   └─────────────┬──────────────┘
-                 │
-   ┌─────────────▼──────────────┐
-   │     RabbitMQ 3.13          │  秒杀异步下单 / 死信队列 TTL 超时关单
-   └─────────────┬──────────────┘
-                 │
-   ┌─────────────▼──────────────┐
-   │      MySQL 8.0             │  商品 / 订单 / 用户 / 秒杀配置
-   └────────────────────────────┘
-                 │
-   ┌─────────────▼──────────────┐
-   │  Prometheus  ◀────  Grafana│  指标采集与可视化大盘
-   └────────────────────────────┘
-                 │
-   ┌─────────────▼──────────────┐
-   │        Zipkin              │  分布式链路追踪（W3C traceparent）
-   └────────────────────────────┘
+                        ┌──────────────────┐
+      Client  ────────▶ │  Nginx (8090)    │  轮询负载均衡 + keepalive
+                        └────────┬─────────┘
+                   ┌─────────────┴─────────────┐
+                   ▼                           ▼
+          ┌─────────────────┐         ┌─────────────────┐
+          │ app1 (Spring)   │         │ app2 (Spring)   │  ← Nacos 注册/配置
+          │ 本地售罄标记    │         │ 本地售罄标记    │  ← Sentinel 规则
+          └──┬────┬────┬────┘         └──┬────┬────┬────┘
+             │    │    │                 │    │    │
+             ▼    ▼    ▼                 ▼    ▼    ▼
+      ┌────────┐ ┌───────────┐   ┌─────────────┐ ┌──────────────────┐
+      │ Redis7 │ │ RocketMQ  │   │ RabbitMQ    │ │ ShardingSphere   │
+      │ Lua预减│ │ 事务消息  │   │ 延迟关单    │ │ JDBC (XA)        │
+      └────────┘ └─────┬─────┘   └──────┬──────┘ └────────┬─────────┘
+                       │                │                 │
+                  ┌────▼────────────────▼─────────────────▼────┐
+                  │  MySQL 8：ds0 主库（用户/商品/秒杀/幂等日志） │
+                  │           ds1/ds2 订单库（oms/seckill 8 分片）│
+                  └────────────────────────────────────────────┘
+
+      Elasticsearch 8.11 + IK ── 商品搜索 / 索引增量同步
+      Prometheus + Grafana + Zipkin ── 指标、大盘、链路追踪
 ```
 
 ## 技术栈
@@ -67,10 +61,14 @@
 | 层级 | 技术 |
 |---|---|
 | 基础框架 | Spring Boot 3.2.5 / Java 17 |
-| ORM | MyBatis-Plus 3.5.7 + Druid 连接池 |
-| 数据库 | MySQL 8.0 |
-| 缓存/分布式锁 | Redis 7 + Redisson 3.31 |
-| 消息队列 | RabbitMQ 3.13（死信队列 TTL 方案） |
+| ORM | MyBatis-Plus 3.5.7 + Druid 1.2.23 |
+| 数据库 | MySQL 8.0（主库 + 2 个订单分库） |
+| 分库分表 | ShardingSphere-JDBC 5.5.0（8 分片，XA + Atomikos） |
+| 缓存/分布式锁 | Redis 7 + Redisson 3.31 + Caffeine 本地缓存 |
+| 消息队列 | RabbitMQ 3.13（延迟关单）+ RocketMQ 5.3.1（事务消息 + Broker 回查） |
+| 注册/配置中心 | Nacos 2.4.3 |
+| 流量治理 | Sentinel 1.8.8（热点参数限流，规则持久化 Nacos） |
+| 商品搜索 | Elasticsearch 8.11.4 + IK 中文分词 |
 | 安全 | Spring Security + JWT（access/refresh 双 token + refresh 轮换 + Redis 黑名单登出）+ BCrypt |
 | 接口文档 | Knife4j 4.5（SpringDoc OpenAPI 3） |
 | 监控 | Micrometer + Prometheus + Grafana |
@@ -83,7 +81,11 @@
 - **商品中心**：SPU/SKU 模型、分类树形结构、多级缓存（Caffeine 本地 L1 + Redis L2 + 空值防穿透 + Redisson 锁防击穿 + TTL 抖动防雪崩）
 - **购物车**：Redis Hash 存储，库存校验、数量修改、勾选
 - **订单系统**：状态机流转（待支付→已支付→已发货→已完成/已取消）、幂等令牌、RabbitMQ 死信队列超时自动关单、服务端重算价防篡改
-- **秒杀系统**：六级漏斗（验证码→路径→时间→库存→一人一单→MQ）、Redis Lua 原子预减、本地内存售罄标记（2.16× 优化）、异步下单消费失败入死信队列(DLQ)兜底告警
+- **秒杀系统**：六级漏斗（售罄标记→路径→时间→库存→一人一单→MQ）、Redis Lua 原子预减、本地内存售罄标记（2.16× 优化）、RocketMQ 事务消息异步下单、消费失败入死信队列(DLQ)兜底告警
+- **交易一致性**：RocketMQ 事务消息（半消息 → 本地事务 → commit/rollback → Broker 回查）替代纯 afterCommit 发送，Redis 事务标记支撑回查
+- **订单分库分表**：ShardingSphere-JDBC 8 分片（库 `user_id % 2`，表 `(user_id >> 1) % 4`），XA + Atomikos 保证跨库原子性，订单/秒杀关联/明细同槽位路由
+- **商品搜索**：Elasticsearch 8.11.4 + IK 中文分词，关键词高亮、分类/价格筛选、销量/价格排序；Redis 脏集合增量同步 + 定时补偿，ES 不可用时自动降级 DB
+- **服务治理**：Nacos 注册/配置中心，Sentinel 热点参数限流（秒杀接口 2000 QPS），规则持久化 Nacos 并在控制台热更新
 - **接口限流**：基于 Redis Lua 脚本的滑动窗口限流，注解式 `@AccessLimit`
 - **图形验证码**：Base64 下发，Lua 一次性消费
 
@@ -92,19 +94,42 @@
 六级漏斗逐级拦截，将无效请求挡在最前端，保护 DB：
 
 ```
-请求 → ① 动态下单路径校验（防直接撞接口）
-     → ② 本地内存售罄标记（JVM 内命中，零 Redis 调用）
-     → ③ 场次/时间窗口校验
+请求 → ① 本地内存售罄标记（命中直接拒绝，0 次 Redis 调用）
+     → ② 动态下单路径校验（Redis GET，防直接撞接口）
+     → ③ 秒杀商品/时间窗口校验（Caffeine 本地缓存，未命中回源 Redis）
      → ④ Redis Lua 原子预减库存 + 一人一单判重（原子操作）
-     → ⑤ RabbitMQ 异步下单（削峰）
+     → ⑤ RocketMQ 事务消息异步下单（半消息 → 本地事务 → commit/rollback）
      → ⑥ 前端轮询结果（QUEUING → SUCCESS/FAIL）
 ```
 
-**核心优化**：第②级本地内存售罄标记使库存抢空后的请求完全跳过 Redis，实测 QPS 提升 **2.16 倍**。
+**核心优化**：
+- 本地售罄标记前移到第①级，并对标记加 10s TTL（`seckill.local-mark-ttl-seconds`），多实例补货后自动自愈，实测拒绝路径 QPS 提升 **2.16 倍**至 2k+
+- 秒杀商品信息走 Caffeine 本地缓存（5s），热路径省掉 2 次 Redis 往返
+- 认证信息 Caffeine 缓存 30s，每请求省掉 3 次 DB 查询（用户 + 角色 + 权限）
+- Lua 预减成功顺带删除结果 key，省掉 1 次独立 `DEL`
 
 ## 分布式事务与一致性设计
 
-秒杀链路涉及 Redis 预减库存、MQ 异步下单、DB 扣减与订单落库多个异构数据源，**无法用单机事务强一致**。本项目采用「**事务提交后发送（afterCommit）+ 消费端幂等表 + DB 兜底 + 失败补偿**」的最终一致性方案，而非 Seata AT/2PC 强一致方案。
+秒杀链路涉及 Redis 预减库存、MQ 异步下单、DB 扣减与订单落库多个异构数据源，**无法用单机事务强一致**。
+
+### 秒杀下单：RocketMQ 事务消息（默认链路）
+
+`mall.rocketmq.enabled=true`（`docker-compose.yml` 默认开启）时使用事务消息：
+
+```
+1. 发送半消息（对消费者不可见）
+2. executeLocalTransaction：Redis Lua 原子预减 + 一人一单，结果写入 Redis 事务标记（TTL 1h）
+3. 本地事务成功 → COMMIT；售罄/重复/异常 → ROLLBACK
+4. Broker 长时间未收到二次确认 → 回查 checkLocalTransaction，读 Redis 标记决定提交或回滚
+```
+
+| 本地事务状态 | 触发条件 | 半消息动作 |
+|---|---|---|
+| `COMMIT` | 预减成功 | 投递，消费端落单 |
+| `ROLLBACK` | 已售罄 | 丢弃，不产生订单 |
+| `ROLLBACK` | 一人一单命中 | 丢弃，返回重复下单 |
+
+`mall.rocketmq.enabled=false` 时回退到 RabbitMQ + `afterCommit` 发送方案（见下方四层防线）。两条链路共存，通过配置切换，便于对比与降级。
 
 ### 为什么不用 Seata AT / 2PC
 
@@ -243,7 +268,7 @@ management:
 
 ```bash
 # 启动后访问 Zipkin UI
-http://localhost:9411
+http://localhost:19411
 
 # 发起任意请求后，从响应头 X-Trace-Id 取 traceId，在 Zipkin 搜索即可看到完整调用链：
 # HTTP 请求 → Redis 操作 → RabbitMQ 发送/消费 → MySQL 查询
@@ -260,10 +285,12 @@ npm install --registry=https://registry.npmmirror.com
 npm run build
 cd ..
 
-# 2. 一键启动全栈（MySQL/Redis/RabbitMQ/双应用/Nginx+前端/Prometheus/Grafana）
+# 2. 一键启动全栈
+#    MySQL（主库 + 2 订单库）/Redis/RabbitMQ/RocketMQ/Nacos/Sentinel/Elasticsearch
+#    双应用实例/Nginx+前端/Prometheus/Grafana/Zipkin
 docker compose up -d
 
-# 3. 等待中间件与应用健康（约 60s），检查容器状态
+# 3. 等待中间件与应用健康（首次启动含 ES 建索引，约 90s），检查容器状态
 docker compose ps
 
 # 4. 访问前端首页
@@ -283,13 +310,22 @@ docker compose down -v
 
 | 服务 | 宿主端口 | 说明 |
 |---|---|---|
-| Nginx（应用入口） | 8090 | 所有 API / 文档 |
+| Nginx（应用入口） | 8090 | 所有 API / 文档 / 前端 |
 | Grafana | 13000 | 监控大盘（admin / admin123） |
-| Zipkin | 9411 | 分布式链路追踪 UI |
+| Zipkin | 19411 | 分布式链路追踪 UI |
 | Prometheus | 9090 | 指标查询 |
-| MySQL | 13306 | root / root123456 |
+| MySQL（主库） | 13306 | root / root123456 |
+| MySQL（订单分库 ds1） | 13307 | root / root123456 |
+| MySQL（订单分库 ds2） | 13308 | root / root123456 |
 | Redis | 6380 | 密码 mall123456 |
 | RabbitMQ 管理台 | 15672 | mall / mall123456 |
+| RocketMQ NameServer | 9876 | Broker 10911 |
+| Nacos 控制台 | 8848 | nacos / nacos（鉴权已关闭） |
+| Sentinel 控制台 | 8858 | sentinel / sentinel |
+| Elasticsearch | 9200 | 无鉴权（仅本地） |
+
+> 容器数量较多，8GB 内存以下的机器建议只启动核心链路：
+> `docker compose up -d mysql mysql-order-0 mysql-order-1 redis rabbitmq rocketmq-namesrv rocketmq-broker app1 app2 nginx`
 
 ### 端到端冒烟测试
 
@@ -335,7 +371,10 @@ java -jar target/mall-seckill.jar
 | 购物车 | `/api/cart/*` | 加购 / 修改数量 / 勾选 / 列表 |
 | 订单 | `/api/order/*` | 创建 / 支付 / 发货 / 确认 / 取消 / 列表 |
 | 秒杀 | `/api/seckill/*` | 场次列表 / 换取路径 / 执行抢购 / 结果轮询 |
+| 搜索 | `/api/search/spu` | 关键词（IK 分词）/ 分类 / 价格区间 / 排序 / 高亮 |
 | 管理端 | `/api/admin/*` | 商品、分类、订单、秒杀活动/场次/SKU 管理 |
+| 搜索运维 | `/api/admin/search/reindex` | 全量重建 ES 索引 |
+| 治理 | `/api/admin/governance/state` | 查看 Nacos/Sentinel 当前治理状态 |
 | 健康 | `/api/health` | 存活探针 |
 
 公开端点（无需 token）：`/api/auth/login`、`/api/auth/register`、`/api/auth/refresh`、`/api/health`、`/doc.html`、`/v3/api-docs/**`。
@@ -344,41 +383,43 @@ java -jar target/mall-seckill.jar
 
 ```bash
 mvn test
-# Tests run: 66, Failures: 0, Errors: 0
+# Tests run: 71, Failures: 0, Errors: 0
 ```
 
 测试金字塔：
 
 | 层级 | 数量 | 说明 |
 |---|---|---|
-| 单元测试 | 62 | Mockito 纯单测，隔离 DB/MQ/Redis，毫秒级。覆盖秒杀漏斗六级出口、订单状态机、购物车、验证码、限流切面、JWT 黑名单、多级缓存（Caffeine→Redis→DB 回源与失效）、TraceId 响应过滤器 |
-| 集成测试 | 4 | JVM 内嵌 Redis（embedded-redis），验证 Lua 原子预减、一人一单判重、库存耗尽售罄、结果轮询 |
+| 单元测试 | 66 | Mockito 纯单测，隔离 DB/MQ/Redis，毫秒级。覆盖秒杀漏斗六级出口、订单状态机、购物车、验证码、限流切面、JWT 黑名单、多级缓存（Caffeine→Redis→DB 回源与失效）、TraceId 响应过滤器、RocketMQ 事务监听器三种本地事务状态、ES 搜索降级 |
+| 集成测试 | 5 | JVM 内嵌 Redis（embedded-redis），验证 Lua 原子预减、一人一单判重、库存耗尽售罄、结果轮询、售罄补偿 |
 
 ## 性能压测
 
-完整报告见 [benchmark-report.md](benchmark-report.md)。
+完整报告（环境、方法、矩阵、瓶颈分析）见 [benchmark-report-v2.md](benchmark-report-v2.md)。
 
-| 指标 | 数值 |
-|---|---|
-| 一人一单拒绝路径峰值 QPS（c=400） | **921** |
-| 售罄拒绝路径 QPS（本地标记 ON） | **1026** |
-| 售罄拒绝路径 QPS（本地标记 OFF） | 476 |
-| 成功下单路径同步 QPS（c=400） | **738** |
-| 异步消费层双实例合计 TPS | **~600**（队列无堆积） |
-| 本地标记优化收益 | **2.16×** |
-| 压测期间错误率 | 0% |
+| 指标 | P0 基线 | P5 优化后 |
+|---|---|---|
+| 售罄拒绝 QPS（c=100） | 787 | **2539**（峰值） |
+| 售罄拒绝 QPS（c=200） | — | **2222** |
+| 售罄拒绝 QPS（c=400） | 555（22 个网络错误） | 1128~1334（0 错误） |
+| 成功下单 QPS（c=200，一人一单） | — | **1013**（峰值）/ 847（中位） |
+| 错误率 | 0.44% | <0.01% |
+| 不超卖 / 不重复 | 0 | 0（8 分片累计 27005 单验签） |
+
+> 压测客户端 `scripts/SeckillBench.java` 运行在 compose 网络内的容器中，直连 Nginx，避开 Windows 端口转发噪声。同一配置跨轮次波动 1.0k~2.5k，主因是宿主空闲内存不足 0.5GB；成功路径瓶颈为「同一 JVM 既发事务消息又消费 + Atomikos XA 写 3 个 MySQL」的 CPU 消耗。
 
 复现命令：
 
 ```bash
-# 压测模式启动
+# 压测模式启动（关闭限流/验证码/Zipkin 采样）
 docker compose -f docker-compose.yml -f docker-compose.bench.yml up -d
 
-# 初始化压测商品
-powershell -ExecutionPolicy Bypass -File scripts/phase10-setup.ps1
+# 全矩阵：售罄拒绝 + 成功下单（容器内客户端）
+powershell -ExecutionPolicy Bypass -File scripts/phase5-bench.ps1 -Mode all -SkuId 4 `
+  -RejectTotal 8000 -SuccessUsers 3000 -SuccessConcurrency 200
 
-# 执行压测（seckillSkuId=4，5000 请求 / 200 并发）
-powershell -ExecutionPolicy Bypass -File scripts/phase7-bench.ps1 -SkuId 4 -Total 5000 -Concurrency 200
+# 只跑售罄拒绝（c=100/200/300）
+powershell -ExecutionPolicy Bypass -File scripts/phase5-bench.ps1 -Mode reject -RejectConcurrency 100,200,300
 ```
 
 ## 监控与可观测性
@@ -392,13 +433,16 @@ powershell -ExecutionPolicy Bypass -File scripts/phase7-bench.ps1 -SkuId 4 -Tota
   - `mall_rabbitmq.queue.messages`：队列堆积深度
 - **Grafana 大盘**：启动后自动 provisioning「秒杀可观测大盘」，访问 http://localhost:13000
 - **Prometheus**：http://localhost:9090，targets 含 app1/app2 双实例
-- **链路追踪**：Zipkin http://localhost:9411，响应头 `X-Trace-Id` 可直接定位调用链
+- **链路追踪**：Zipkin http://localhost:19411，响应头 `X-Trace-Id` 可直接定位调用链
+- **注册/配置**：Nacos http://localhost:8848（服务列表、配置项、Sentinel 规则）
+- **流量治理**：Sentinel http://localhost:8858（热点参数限流规则，持久化在 Nacos）
+- **搜索**：Elasticsearch http://localhost:9200，索引 `mall_spu`
 
 ## CI/CD
 
 `.github/workflows/ci.yml` 在 push/PR 到 main 时触发：
 
-1. **test**：JDK 17 + Maven，`mvn verify` 跑全部 66 个用例作为合并门禁；失败上传 surefire 报告
+1. **test**：JDK 17 + Maven，`mvn verify` 跑全部 71 个用例作为合并门禁；失败上传 surefire 报告
 2. **docker-build**：测试通过后构建多阶段 Docker 镜像，验证 Dockerfile 可构建
 
 ## 项目结构
@@ -416,17 +460,25 @@ mall-seckill/
 │   ├── entity/              # MyBatis-Plus 实体
 │   ├── mapper/              # DAO
 │   ├── dto/  vo/  model/    # 请求/响应/缓存模型
-│   ├── config/              # 配置类（Redis/Rabbit/Redisson/Security/...）
-│   ├── security/            # JWT 认证授权
-│   ├── mq/                  # RabbitMQ 生产者/消费者
+│   ├── config/              # 配置类（Redis/Rabbit/RocketMQ/Security/Sentinel/...）
+│   ├── security/            # JWT 认证授权 + 用户信息本地缓存
+│   ├── mq/                  # RabbitMQ 生产者/消费者（延迟关单）
+│   ├── mq/rocketmq/         # RocketMQ 事务消息：生产者 / 本地事务 / 回查 / 消费
+│   ├── search/              # ES 检索、索引同步与降级
 │   ├── metrics/             # Micrometer 埋点与导出
 │   ├── common/aspect/       # 限流切面
 │   └── common/exception/    # 全局异常处理
 │
+├── src/main/resources/
+│   ├── application-prod.yml # 容器化配置（全部支持环境变量覆盖）
+│   └── sharding.yaml        # ShardingSphere 8 分片 + XA 规则
 ├── src/test/java/com/mall/  # 单元/集成测试
 ├── sql/init/                # 01-09 初始化脚本（schema + 种子数据）
-├── scripts/                 # 冒烟 / 压测脚本
-└── docker/                  # Nginx/Prometheus/Grafana/Maven 配置
+├── sql/sharding/            # 订单分库建表脚本（ds1/ds2）
+├── scripts/                 # SeckillBench.java + phaseN 验证/压测脚本
+├── docker/                  # Nginx/RocketMQ/Prometheus/Grafana/ES 配置
+├── docs/                    # 交易中台升级方案、面试问答
+└── benchmark-report-v2.md   # P0~P5 压测与瓶颈报告
 ```
 
 ## 前端页面
