@@ -481,7 +481,7 @@ mall-seckill/
 ├── sql/init/                # 01-09 初始化脚本（schema + 种子数据）
 ├── sql/sharding/            # 订单分库建表脚本（ds1/ds2）
 ├── scripts/                 # SeckillBench.java + phaseN 验证/压测脚本
-├── docker/                  # Nginx/RocketMQ/Prometheus/Grafana/ES 配置
+├── docker/                  # Nginx/RocketMQ/Prometheus/Grafana/ES/Maven 镜像加速配置
 ├── docs/                    # 01–03 架构/Redis/MQ，06–07 升级方案与面试问答
 └── benchmark-report-v2.md   # P0~P5 压测与瓶颈报告
 ```

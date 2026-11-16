@@ -3,7 +3,7 @@
 # 仅中间件: docker compose up -d mysql redis rabbitmq
 # 停止: docker compose down
 # 清理数据卷: docker compose down -v
-# 显式指定 Compose 项目名，避免默认取目录名（java3）
+# 显式指定 Compose 项目名，避免默认取目录名
 name: mall-seckill
 
 # 应用实例共享配置锚点

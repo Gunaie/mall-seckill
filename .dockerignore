@@ -8,3 +8,6 @@ target/
 # 文档与脚本（运行镜像不需要）
 scripts/
 *.md
+# 前端产物（由 Nginx 容器挂载，不进后端镜像构建上下文）
+frontend/node_modules/
+frontend/dist/
